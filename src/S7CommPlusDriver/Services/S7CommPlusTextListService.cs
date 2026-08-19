@@ -127,6 +127,7 @@ namespace S7CommPlusDriver
                 return S7Consts.errIsoInvalidPDU;
             }
             pos += 4;
+            var decodedTexts = new Dictionary<uint, string>();
 
             for (var i = 0; i < listCount; i++)
             {
@@ -137,7 +138,7 @@ namespace S7CommPlusDriver
                 }
                 pos += 6;
 
-                if (!TryReadEntries(entryTable, stringTable, entryOffset, out var entries))
+                if (!TryReadEntries(entryTable, stringTable, entryOffset, decodedTexts, out var entries))
                 {
                     return S7Consts.errIsoInvalidPDU;
                 }
@@ -158,9 +159,14 @@ namespace S7CommPlusDriver
                 : S7CommPlusTextListType.System;
         }
 
-        private static bool TryReadEntries(byte[] entryTable, byte[] stringTable, uint entryOffset, out List<S7CommPlusTextListEntry> entries)
+        private static bool TryReadEntries(
+            byte[] entryTable,
+            byte[] stringTable,
+            uint entryOffset,
+            Dictionary<uint, string> decodedTexts,
+            out S7CommPlusTextListEntry[] entries)
         {
-            if (TryReadEntries(entryTable, stringTable, entryOffset, use32BitValues: true, out entries))
+            if (TryReadEntries(entryTable, stringTable, entryOffset, decodedTexts, use32BitValues: true, out entries))
             {
                 return true;
             }
@@ -168,15 +174,16 @@ namespace S7CommPlusDriver
             // Older S7-1200/1500 firmware stores each list entry as a 16-bit
             // value followed by a 32-bit string offset. Current firmware uses
             // a signed 32-bit value and therefore an eight-byte record.
-            return TryReadEntries(entryTable, stringTable, entryOffset, use32BitValues: false, out entries);
+            return TryReadEntries(entryTable, stringTable, entryOffset, decodedTexts, use32BitValues: false, out entries);
         }
 
         private static bool TryReadEntries(
             byte[] entryTable,
             byte[] stringTable,
             uint entryOffset,
+            Dictionary<uint, string> decodedTexts,
             bool use32BitValues,
-            out List<S7CommPlusTextListEntry> entries)
+            out S7CommPlusTextListEntry[] entries)
         {
             entries = null;
             if (!TryReadUInt32(entryTable, entryOffset, out var entryCount))
@@ -184,7 +191,11 @@ namespace S7CommPlusDriver
                 return false;
             }
 
-            entries = new List<S7CommPlusTextListEntry>();
+            if (entryCount > Int32.MaxValue)
+            {
+                return false;
+            }
+            entries = new S7CommPlusTextListEntry[(int)entryCount];
             var pos = entryOffset + 4;
             for (var i = 0; i < entryCount; i++)
             {
@@ -211,19 +222,26 @@ namespace S7CommPlusDriver
                     pos += 6;
                 }
 
-                if (!TryReadText(stringTable, stringOffset, out var text))
+                if (!TryReadText(stringTable, stringOffset, decodedTexts, out var text))
                 {
                     return false;
                 }
-                entries.Add(new S7CommPlusTextListEntry(value, value, text));
+                entries[i] = new S7CommPlusTextListEntry(value, value, text);
             }
 
             return true;
         }
 
-        private static bool TryReadText(byte[] stringTable, uint offset, out string text)
+        private static bool TryReadText(
+            byte[] stringTable,
+            uint offset,
+            Dictionary<uint, string> decodedTexts,
+            out string text)
         {
-            text = null;
+            if (decodedTexts.TryGetValue(offset, out text))
+            {
+                return true;
+            }
             if (!TryReadUInt16(stringTable, offset, out var length))
             {
                 return false;
@@ -236,6 +254,7 @@ namespace S7CommPlusDriver
             }
 
             text = Utils.GetUtfString(stringTable, start, length);
+            decodedTexts.Add(offset, text);
             return true;
         }
 

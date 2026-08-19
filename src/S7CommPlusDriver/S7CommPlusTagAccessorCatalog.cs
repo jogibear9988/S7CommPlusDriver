@@ -19,7 +19,8 @@ namespace S7CommPlusDriver
     /// </remarks>
     public sealed class S7CommPlusTagAccessorCatalog
     {
-        private const int CurrentFormatVersion = 1;
+        private const int CurrentFormatVersion = 2;
+        private const int MinimumSupportedFormatVersion = 1;
         private const int MaximumEntryCount = 2_000_000;
         private const int MaximumAggregateElementCount = 2_000_000;
         private const int MaximumDescriptorDepth = 32;
@@ -95,8 +96,14 @@ namespace S7CommPlusDriver
         /// <exception cref="ArgumentException">The collection contains a null, empty, or whitespace-only symbol.</exception>
         public bool CoversSymbols(IEnumerable<string> symbols)
         {
-            foreach (var symbol in NormalizeSymbols(symbols))
+            if (symbols == null) throw new ArgumentNullException(nameof(symbols));
+
+            foreach (var symbol in symbols)
             {
+                if (string.IsNullOrWhiteSpace(symbol))
+                {
+                    throw new ArgumentException("Symbol collection cannot contain null, empty, or whitespace-only entries.", nameof(symbols));
+                }
                 if (!_entries.ContainsKey(symbol))
                 {
                     return false;
@@ -114,24 +121,45 @@ namespace S7CommPlusDriver
         /// <exception cref="ArgumentException">The collection contains an invalid or uncovered symbol.</exception>
         public IReadOnlyDictionary<string, PlcTag> CreateTags(IEnumerable<string> symbols)
         {
-            var requestedSymbols = NormalizeSymbols(symbols);
-            var result = new Dictionary<string, PlcTag>(requestedSymbols.Count, StringComparer.Ordinal);
-            foreach (var symbol in requestedSymbols)
+            return CreateTagDictionary(symbols);
+        }
+
+        /// <summary>
+        /// Creates an owned mutable dictionary of independent PLC tags for the requested symbols resolved by this catalog.
+        /// </summary>
+        /// <param name="symbols">The covered symbols to materialize. Known-missing symbols are omitted from the result.</param>
+        /// <returns>A case-sensitive dictionary that the caller may retain directly without copying.</returns>
+        public Dictionary<string, PlcTag> CreateTagDictionary(IEnumerable<string> symbols)
+        {
+            if (symbols == null) throw new ArgumentNullException(nameof(symbols));
+
+            var capacity = symbols is IReadOnlyCollection<string> collection ? collection.Count : 0;
+            var result = new Dictionary<string, PlcTag>(capacity, StringComparer.Ordinal);
+            foreach (var symbol in symbols)
             {
+                if (string.IsNullOrWhiteSpace(symbol))
+                {
+                    throw new ArgumentException("Symbol collection cannot contain null, empty, or whitespace-only entries.", nameof(symbols));
+                }
+                if (result.ContainsKey(symbol))
+                {
+                    continue;
+                }
                 if (!_entries.TryGetValue(symbol, out var descriptor))
                 {
                     throw new ArgumentException($"The accessor catalog does not cover symbol '{symbol}'.", nameof(symbols));
                 }
-                if (descriptor != null)
-                {
-                    result.Add(symbol, descriptor.CreateTag());
-                }
+                result.Add(symbol, descriptor?.CreateTag(symbol));
+            }
+            foreach (var missingSymbol in _missingSymbols)
+            {
+                result.Remove(missingSymbol);
             }
             return result;
         }
 
         /// <summary>
-        /// Writes the catalog to a deterministic, versioned binary stream without closing the caller-owned stream.
+        /// Writes the catalog to a versioned binary stream without closing the caller-owned stream.
         /// </summary>
         /// <param name="destination">A writable stream positioned where the catalog should begin.</param>
         /// <exception cref="ArgumentNullException"><paramref name="destination"/> is <see langword="null"/>.</exception>
@@ -146,11 +174,11 @@ namespace S7CommPlusDriver
             writer.Write(CurrentFormatVersion);
             WriteString(writer, ProgramStructureHash);
             writer.Write(_entries.Count);
-            foreach (var entry in _entries.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+            foreach (var entry in _entries)
             {
                 WriteString(writer, entry.Key);
                 writer.Write(entry.Value != null);
-                entry.Value?.WriteTo(writer);
+                entry.Value?.WriteTo(writer, includeName: false);
             }
         }
 
@@ -183,7 +211,7 @@ namespace S7CommPlusDriver
                 }
 
                 var version = reader.ReadInt32();
-                if (version != CurrentFormatVersion)
+                if (version < MinimumSupportedFormatVersion || version > CurrentFormatVersion)
                 {
                     throw new InvalidDataException($"Unsupported S7CommPlus tag-accessor catalog version {version}.");
                 }
@@ -207,7 +235,11 @@ namespace S7CommPlusDriver
                     {
                         throw new InvalidDataException("The tag-accessor catalog contains an invalid or duplicate symbol name.");
                     }
-                    entries.Add(symbol, reader.ReadBoolean() ? TagDescriptor.ReadFrom(reader, 0) : null);
+                    entries.Add(
+                        symbol,
+                        reader.ReadBoolean()
+                            ? TagDescriptor.ReadFrom(reader, 0, version >= 2 ? symbol : null)
+                            : null);
                 }
                 return new S7CommPlusTagAccessorCatalog(structureHash, entries);
             }
@@ -330,9 +362,9 @@ namespace S7CommPlusDriver
 
             /// <summary>Creates a fresh mutable driver tag and recursively recreates aggregate element tags.</summary>
             /// <returns>An accessor that shares no mutable state with previous materializations.</returns>
-            internal PlcTag CreateTag()
+            internal PlcTag CreateTag(string nameOverride = null)
             {
-                var tag = PlcTags.TagFactory(Name, _address.CreateAddress(), Datatype, _aggregateElements.Count > 0);
+                var tag = PlcTags.TagFactory(nameOverride ?? Name, _address.CreateAddress(), Datatype, _aggregateElements.Count > 0);
                 if (tag == null)
                 {
                     throw new InvalidDataException($"The cached datatype {Datatype} for symbol '{Name}' is not supported by this driver version.");
@@ -346,9 +378,12 @@ namespace S7CommPlusDriver
 
             /// <summary>Writes this descriptor and its aggregate elements to the catalog stream.</summary>
             /// <param name="writer">The destination writer.</param>
-            internal void WriteTo(BinaryWriter writer)
+            internal void WriteTo(BinaryWriter writer, bool includeName = true)
             {
-                WriteString(writer, Name);
+                if (includeName)
+                {
+                    WriteString(writer, Name);
+                }
                 writer.Write(Datatype);
                 _address.WriteTo(writer);
                 writer.Write(_aggregateElements.Count);
@@ -362,13 +397,13 @@ namespace S7CommPlusDriver
             /// <param name="reader">The source reader.</param>
             /// <param name="depth">The current nesting depth used to reject maliciously recursive cache files.</param>
             /// <returns>The validated descriptor.</returns>
-            internal static TagDescriptor ReadFrom(BinaryReader reader, int depth)
+            internal static TagDescriptor ReadFrom(BinaryReader reader, int depth, string nameOverride = null)
             {
                 if (depth > MaximumDescriptorDepth)
                 {
                     throw new InvalidDataException("The cached aggregate tag nesting exceeds the supported depth.");
                 }
-                var name = ReadString(reader, "tag name");
+                var name = nameOverride ?? ReadString(reader, "tag name");
                 if (string.IsNullOrWhiteSpace(name))
                 {
                     throw new InvalidDataException("A cached tag descriptor has no name.");
@@ -414,7 +449,7 @@ namespace S7CommPlusDriver
             internal static AddressDescriptor FromAddress(ItemAddress address)
             {
                 if (address == null) throw new ArgumentNullException(nameof(address));
-                return new AddressDescriptor(address.SymbolCrc, address.AccessArea, address.AccessSubArea, address.LID.ToArray());
+                return new AddressDescriptor(address.SymbolCrc, address.AccessArea, address.AccessSubArea, address.CopyLocalIds());
             }
 
             /// <summary>Creates a fresh mutable item address for one materialized tag.</summary>
@@ -422,7 +457,10 @@ namespace S7CommPlusDriver
             internal ItemAddress CreateAddress()
             {
                 var address = new ItemAddress(AccessArea, AccessSubArea) { SymbolCrc = SymbolCrc };
-                address.LID.AddRange(_localIds);
+                foreach (var localId in _localIds)
+                {
+                    address.AddLocalId(localId);
+                }
                 return address;
             }
 

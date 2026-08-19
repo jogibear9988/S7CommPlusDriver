@@ -733,6 +733,18 @@ namespace S7CommPlusDriver.Tests
         }
 
         [Fact]
+        public void ItemAddressLegacyLocalIdListRemainsMutable()
+        {
+            var address = new ItemAddress("8A0E0001.F.10");
+
+            address.LID.Add(0x2);
+            address.LID.RemoveAt(0);
+
+            Assert.Equal("8A0E0001.10.2", address.GetAccessString());
+            Assert.Equal(6u, address.GetNumberOfFields());
+        }
+
+        [Fact]
         public void PlcTagCharRejectsCharactersThatDoNotFitOnePlcByte()
         {
             var tag = new PlcTagChar("CharValue", new ItemAddress("8A0E0001.F"), Softdatatype.S7COMMP_SOFTDATATYPE_CHAR);

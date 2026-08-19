@@ -1643,7 +1643,7 @@ namespace S7CommPlusDriver
                     var adr1 = new ItemAddress();
                     adr1.AccessArea = data.db_block_relid;
                     adr1.AccessSubArea = Ids.DB_ValueActual;
-                    adr1.LID.Add(1);
+                    adr1.AddLocalId(1);
                     readlist.Add(adr1);
                 }
             }
@@ -2457,7 +2457,7 @@ namespace S7CommPlusDriver
                     var adr1 = new ItemAddress();
                     adr1.AccessArea = data.db_block_relid;
                     adr1.AccessSubArea = Ids.DB_ValueActual;
-                    adr1.LID.Add(1);
+                    adr1.AddLocalId(1);
                     readlist.Add(adr1);
                 }
             }

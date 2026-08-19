@@ -1045,7 +1045,7 @@ namespace S7CommPlusDriver
                 throw new ArgumentNullException(nameof(tags));
             }
 
-            var tagList = tags.ToList();
+            var tagList = tags as IReadOnlyList<PlcTag> ?? tags.ToList();
             if (tagList.Any(tag => tag == null))
             {
                 throw new ArgumentException("Tag list cannot contain null entries.", nameof(tags));
@@ -1057,29 +1057,34 @@ namespace S7CommPlusDriver
 
             return ExecuteReadOperationAsync("ReadTags", session =>
             {
-                var requestTags = tagList
-                    .SelectMany(tag => tag.AggregateElements.Count > 0 ? tag.AggregateElements : new[] { tag })
-                    .ToList();
+                var requestTags = ExpandAggregateTags(tagList);
                 var (values, itemErrors) = ReadTagValuesInBatches(session, requestTags);
                 var items = new List<S7CommPlusTagReadResult>(tagList.Count);
                 var requestIndex = 0;
                 foreach (var tag in tagList)
                 {
-                    var elementTags = tag.AggregateElements.Count > 0 ? tag.AggregateElements : new[] { tag };
                     var aggregateError = 0UL;
-                    foreach (var elementTag in elementTags)
+                    if (tag.AggregateElements.Count == 0)
                     {
                         var value = requestIndex < values.Count ? values[requestIndex] : null;
                         var itemError = requestIndex < itemErrors.Count ? itemErrors[requestIndex] : ulong.MaxValue;
-                        elementTag.ProcessReadResult(value, itemError);
-                        if (aggregateError == 0 && itemError != 0)
-                        {
-                            aggregateError = itemError;
-                        }
+                        tag.ProcessReadResult(value, itemError);
+                        aggregateError = itemError;
                         requestIndex++;
                     }
-                    if (tag.AggregateElements.Count > 0)
+                    else
                     {
+                        foreach (var elementTag in tag.AggregateElements)
+                        {
+                            var value = requestIndex < values.Count ? values[requestIndex] : null;
+                            var itemError = requestIndex < itemErrors.Count ? itemErrors[requestIndex] : ulong.MaxValue;
+                            elementTag.ProcessReadResult(value, itemError);
+                            if (aggregateError == 0 && itemError != 0)
+                            {
+                                aggregateError = itemError;
+                            }
+                            requestIndex++;
+                        }
                         tag.CompleteAggregateRead(aggregateError);
                     }
                     items.Add(new S7CommPlusTagReadResult(tag, aggregateError));
@@ -1131,7 +1136,7 @@ namespace S7CommPlusDriver
                 throw new ArgumentNullException(nameof(tags));
             }
 
-            var tagList = tags.ToList();
+            var tagList = tags as IReadOnlyList<PlcTag> ?? tags.ToList();
             if (tagList.Any(tag => tag == null))
             {
                 throw new ArgumentException("Tag list cannot contain null entries.", nameof(tags));
@@ -1147,25 +1152,31 @@ namespace S7CommPlusDriver
                 {
                     tag.PrepareAggregateWrite();
                 }
-                var requestTags = tagList
-                    .SelectMany(tag => tag.AggregateElements.Count > 0 ? tag.AggregateElements : new[] { tag })
-                    .ToList();
+                var requestTags = ExpandAggregateTags(tagList);
                 var itemErrors = WriteTagValuesInBatches(session, requestTags);
                 var items = new List<S7CommPlusWriteResult>(tagList.Count);
                 var requestIndex = 0;
                 foreach (var tag in tagList)
                 {
-                    var elementTags = tag.AggregateElements.Count > 0 ? tag.AggregateElements : new[] { tag };
                     var aggregateError = 0UL;
-                    foreach (var elementTag in elementTags)
+                    if (tag.AggregateElements.Count == 0)
                     {
                         var itemError = requestIndex < itemErrors.Count ? itemErrors[requestIndex] : ulong.MaxValue;
-                        elementTag.ProcessWriteResult(itemError);
-                        if (aggregateError == 0 && itemError != 0)
-                        {
-                            aggregateError = itemError;
-                        }
+                        aggregateError = itemError;
                         requestIndex++;
+                    }
+                    else
+                    {
+                        foreach (var elementTag in tag.AggregateElements)
+                        {
+                            var itemError = requestIndex < itemErrors.Count ? itemErrors[requestIndex] : ulong.MaxValue;
+                            elementTag.ProcessWriteResult(itemError);
+                            if (aggregateError == 0 && itemError != 0)
+                            {
+                                aggregateError = itemError;
+                            }
+                            requestIndex++;
+                        }
                     }
                     tag.ProcessWriteResult(aggregateError);
                     items.Add(new S7CommPlusWriteResult(tag.Address, aggregateError));
@@ -1182,15 +1193,22 @@ namespace S7CommPlusDriver
         /// <returns>All values and item errors in the same order as <paramref name="requestTags"/>.</returns>
         private (List<object> Values, List<ulong> ItemErrors) ReadTagValuesInBatches(
             IS7CommPlusSession session,
-            IReadOnlyCollection<PlcTag> requestTags)
+            IReadOnlyList<PlcTag> requestTags)
         {
             var values = new List<object>(requestTags.Count);
             var itemErrors = new List<ulong>(requestTags.Count);
-            foreach (var batch in RuntimeCompatibility.Chunk(requestTags, _tagsPerReadRequestMax))
+            for (var batchStart = 0; batchStart < requestTags.Count; batchStart += _tagsPerReadRequestMax)
             {
-                var error = session.ReadValues(batch.Select(tag => tag.Address).ToList(), out var batchValues, out var batchErrors);
+                var batchCount = Math.Min(_tagsPerReadRequestMax, requestTags.Count - batchStart);
+                var addresses = new List<ItemAddress>(batchCount);
+                for (var index = 0; index < batchCount; index++)
+                {
+                    addresses.Add(requestTags[batchStart + index].Address);
+                }
+
+                var error = session.ReadValues(addresses, out var batchValues, out var batchErrors);
                 ThrowIfError("ReadTags", error);
-                for (var index = 0; index < batch.Length; index++)
+                for (var index = 0; index < batchCount; index++)
                 {
                     values.Add(index < batchValues.Count ? batchValues[index] : null);
                     itemErrors.Add(index < batchErrors.Count ? batchErrors[index] : ulong.MaxValue);
@@ -1207,22 +1225,62 @@ namespace S7CommPlusDriver
         /// <returns>All item errors in the same order as <paramref name="requestTags"/>.</returns>
         private List<ulong> WriteTagValuesInBatches(
             IS7CommPlusSession session,
-            IReadOnlyCollection<PlcTag> requestTags)
+            IReadOnlyList<PlcTag> requestTags)
         {
             var itemErrors = new List<ulong>(requestTags.Count);
-            foreach (var batch in RuntimeCompatibility.Chunk(requestTags, _tagsPerWriteRequestMax))
+            for (var batchStart = 0; batchStart < requestTags.Count; batchStart += _tagsPerWriteRequestMax)
             {
-                var error = session.WriteValues(
-                    batch.Select(tag => tag.Address).ToList(),
-                    batch.Select(tag => tag.GetWriteValue()).ToList(),
-                    out var batchErrors);
+                var batchCount = Math.Min(_tagsPerWriteRequestMax, requestTags.Count - batchStart);
+                var addresses = new List<ItemAddress>(batchCount);
+                var values = new List<PValue>(batchCount);
+                for (var index = 0; index < batchCount; index++)
+                {
+                    var tag = requestTags[batchStart + index];
+                    addresses.Add(tag.Address);
+                    values.Add(tag.GetWriteValue());
+                }
+
+                var error = session.WriteValues(addresses, values, out var batchErrors);
                 ThrowIfError("WriteTags", error);
-                for (var index = 0; index < batch.Length; index++)
+                for (var index = 0; index < batchCount; index++)
                 {
                     itemErrors.Add(index < batchErrors.Count ? batchErrors[index] : ulong.MaxValue);
                 }
             }
             return itemErrors;
+        }
+
+        /// <summary>Expands aggregate array accessors, retaining the caller's list when every tag is scalar.</summary>
+        private static IReadOnlyList<PlcTag> ExpandAggregateTags(IReadOnlyList<PlcTag> tags)
+        {
+            var expandedCount = tags.Count;
+            var hasAggregate = false;
+            foreach (var tag in tags)
+            {
+                if (tag.AggregateElements.Count > 0)
+                {
+                    hasAggregate = true;
+                    expandedCount += tag.AggregateElements.Count - 1;
+                }
+            }
+
+            if (!hasAggregate)
+            {
+                return tags;
+            }
+
+            var result = new List<PlcTag>(expandedCount);
+            foreach (var tag in tags)
+            {
+                if (tag.AggregateElements.Count == 0)
+                {
+                    result.Add(tag);
+                    continue;
+                }
+
+                result.AddRange(tag.AggregateElements);
+            }
+            return result;
         }
 
         public async ValueTask DisposeAsync()

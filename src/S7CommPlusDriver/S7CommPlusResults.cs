@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace S7CommPlusDriver
 {
-    public sealed class S7CommPlusReadResult
+    public readonly struct S7CommPlusReadResult
     {
         public S7CommPlusReadResult(ItemAddress address, object value, ulong itemError)
         {
@@ -18,7 +18,7 @@ namespace S7CommPlusDriver
         public bool IsSuccess => ItemError == 0;
     }
 
-    public sealed class S7CommPlusTagReadResult
+    public readonly struct S7CommPlusTagReadResult
     {
         public S7CommPlusTagReadResult(PlcTag tag, ulong itemError)
         {
@@ -31,7 +31,7 @@ namespace S7CommPlusDriver
         public bool IsSuccess => ItemError == 0;
     }
 
-    public sealed class S7CommPlusWriteResult
+    public readonly struct S7CommPlusWriteResult
     {
         public S7CommPlusWriteResult(ItemAddress address, ulong itemError)
         {

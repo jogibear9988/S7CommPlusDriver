@@ -47,35 +47,35 @@ namespace S7CommPlusDriver
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.SystemLimits
             };
-            adrTagsPerReadRequestMax.LID.Add(S7CommPlusProtocolConstants.SystemLimitTagsPerReadRequest);
+            adrTagsPerReadRequestMax.AddLocalId(S7CommPlusProtocolConstants.SystemLimitTagsPerReadRequest);
 
             var adrTagsPerWriteRequestMax = new ItemAddress
             {
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.SystemLimits
             };
-            adrTagsPerWriteRequestMax.LID.Add(S7CommPlusProtocolConstants.SystemLimitTagsPerWriteRequest);
+            adrTagsPerWriteRequestMax.AddLocalId(S7CommPlusProtocolConstants.SystemLimitTagsPerWriteRequest);
 
             var adrPlcSubscriptionsMax = new ItemAddress
             {
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.SystemLimits
             };
-            adrPlcSubscriptionsMax.LID.Add(S7CommPlusProtocolConstants.SystemLimitPlcSubscriptions);
+            adrPlcSubscriptionsMax.AddLocalId(S7CommPlusProtocolConstants.SystemLimitPlcSubscriptions);
 
             var adrPlcAttributesMax = new ItemAddress
             {
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.SystemLimits
             };
-            adrPlcAttributesMax.LID.Add(S7CommPlusProtocolConstants.SystemLimitPlcAttributes);
+            adrPlcAttributesMax.AddLocalId(S7CommPlusProtocolConstants.SystemLimitPlcAttributes);
 
             var adrSubscriptionMemoryMax = new ItemAddress
             {
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.SystemLimits
             };
-            adrSubscriptionMemoryMax.LID.Add(S7CommPlusProtocolConstants.SystemLimitSubscriptionMemory);
+            adrSubscriptionMemoryMax.AddLocalId(S7CommPlusProtocolConstants.SystemLimitSubscriptionMemory);
 
             readlist.Add(adrTagsPerReadRequestMax);
             readlist.Add(adrTagsPerWriteRequestMax);
@@ -125,21 +125,21 @@ namespace S7CommPlusDriver
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.FreeItems
             };
-            adrPlcSubscriptionsFree.LID.Add(S7CommPlusProtocolConstants.SystemLimitPlcSubscriptions);
+            adrPlcSubscriptionsFree.AddLocalId(S7CommPlusProtocolConstants.SystemLimitPlcSubscriptions);
 
             var adrPlcAttributesFree = new ItemAddress
             {
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.FreeItems
             };
-            adrPlcAttributesFree.LID.Add(S7CommPlusProtocolConstants.SystemLimitPlcAttributes);
+            adrPlcAttributesFree.AddLocalId(S7CommPlusProtocolConstants.SystemLimitPlcAttributes);
 
             var adrSubscriptionMemoryFree = new ItemAddress
             {
                 AccessArea = Ids.ObjectRoot,
                 AccessSubArea = Ids.FreeItems
             };
-            adrSubscriptionMemoryFree.LID.Add(S7CommPlusProtocolConstants.SystemLimitSubscriptionMemory);
+            adrSubscriptionMemoryFree.AddLocalId(S7CommPlusProtocolConstants.SystemLimitSubscriptionMemory);
 
             readlist.Add(adrPlcSubscriptionsFree);
             readlist.Add(adrPlcAttributesFree);

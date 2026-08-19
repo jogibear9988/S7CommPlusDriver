@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
+using System.Collections.ObjectModel;
 
 namespace S7CommPlusDriver
 {
@@ -18,7 +17,7 @@ namespace S7CommPlusDriver
         System
     }
 
-    public sealed class S7CommPlusTextListEntry
+    public readonly struct S7CommPlusTextListEntry
     {
         public S7CommPlusTextListEntry(int from, int to, string text)
         {
@@ -35,7 +34,7 @@ namespace S7CommPlusDriver
 
     public sealed class S7CommPlusTextList
     {
-        private readonly Dictionary<int, S7CommPlusTextListEntry> _entriesByValue;
+        private readonly S7CommPlusTextListEntry[] _entries;
 
         public S7CommPlusTextList(int listId, int languageId, S7CommPlusTextListScope scope, IEnumerable<S7CommPlusTextListEntry> entries)
             : this(listId, languageId, scope, S7CommPlusTextListType.Unknown, entries)
@@ -48,11 +47,23 @@ namespace S7CommPlusDriver
             LanguageId = languageId;
             Scope = scope;
             TextListType = textListType;
-            Entries = (entries ?? Enumerable.Empty<S7CommPlusTextListEntry>()).ToList().AsReadOnly();
-            _entriesByValue = Entries
-                .Where(entry => !entry.IsRange)
-                .GroupBy(entry => entry.From)
-                .ToDictionary(group => group.Key, group => group.First());
+            _entries = CreateEntries(entries);
+            Entries = Array.AsReadOnly(_entries);
+        }
+
+        internal S7CommPlusTextList(
+            int listId,
+            int languageId,
+            S7CommPlusTextListScope scope,
+            S7CommPlusTextListType textListType,
+            S7CommPlusTextListEntry[] ownedEntries)
+        {
+            ListId = listId;
+            LanguageId = languageId;
+            Scope = scope;
+            TextListType = textListType;
+            _entries = ownedEntries ?? Array.Empty<S7CommPlusTextListEntry>();
+            Entries = Array.AsReadOnly(_entries);
         }
 
         public int ListId { get; }
@@ -70,36 +81,67 @@ namespace S7CommPlusDriver
             }
 
             var intValue = (int)value;
-            if (_entriesByValue.TryGetValue(intValue, out var entry))
+            foreach (var entry in _entries)
             {
-                text = entry.Text;
-                return true;
+                if (!entry.IsRange)
+                {
+                    if (entry.From == intValue)
+                    {
+                        text = entry.Text;
+                        return true;
+                    }
+                }
             }
 
-            entry = Entries.FirstOrDefault(item => item.IsRange && intValue >= item.From && intValue <= item.To);
-            if (entry == null)
+            foreach (var entry in _entries)
             {
-                return false;
+                if (entry.From <= intValue && entry.IsRange && entry.To >= intValue)
+                {
+                    text = entry.Text;
+                    return true;
+                }
             }
-
-            text = entry.Text;
-            return true;
+            return false;
         }
+
+        private static S7CommPlusTextListEntry[] CreateEntries(IEnumerable<S7CommPlusTextListEntry> entries)
+        {
+            if (entries == null)
+            {
+                return Array.Empty<S7CommPlusTextListEntry>();
+            }
+            var result = entries is ICollection<S7CommPlusTextListEntry> collection
+                ? new List<S7CommPlusTextListEntry>(collection.Count)
+                : new List<S7CommPlusTextListEntry>();
+            result.AddRange(entries);
+            return result.ToArray();
+        }
+
     }
 
     public sealed class S7CommPlusTextListCatalog
     {
         public static readonly S7CommPlusTextListCatalog Empty = new S7CommPlusTextListCatalog(Array.Empty<int>(), Array.Empty<S7CommPlusTextList>());
 
-        private readonly Dictionary<Tuple<int, int>, S7CommPlusTextList> _listsByLanguageAndId;
+        private readonly Dictionary<long, S7CommPlusTextList> _listsByLanguageAndId;
 
         public S7CommPlusTextListCatalog(IEnumerable<int> languageIds, IEnumerable<S7CommPlusTextList> textLists)
         {
-            LanguageIds = (languageIds ?? Enumerable.Empty<int>()).Distinct().ToList().AsReadOnly();
-            TextLists = (textLists ?? Enumerable.Empty<S7CommPlusTextList>()).ToList().AsReadOnly();
-            _listsByLanguageAndId = TextLists
-                .GroupBy(list => Tuple.Create(list.LanguageId, list.ListId))
-                .ToDictionary(group => group.Key, group => group.First());
+            var distinctLanguageIds = CreateDistinctLanguageIds(languageIds);
+            var materializedTextLists = textLists == null
+                ? new List<S7CommPlusTextList>()
+                : new List<S7CommPlusTextList>(textLists);
+            LanguageIds = new ReadOnlyCollection<int>(distinctLanguageIds);
+            TextLists = new ReadOnlyCollection<S7CommPlusTextList>(materializedTextLists);
+            _listsByLanguageAndId = new Dictionary<long, S7CommPlusTextList>(materializedTextLists.Count);
+            foreach (var textList in materializedTextLists)
+            {
+                var key = CreateTextListKey(textList.LanguageId, textList.ListId);
+                if (!_listsByLanguageAndId.ContainsKey(key))
+                {
+                    _listsByLanguageAndId.Add(key, textList);
+                }
+            }
         }
 
         public IReadOnlyList<int> LanguageIds { get; }
@@ -113,7 +155,7 @@ namespace S7CommPlusDriver
         public bool TryResolve(string textListName, long value, int languageId, out string text)
         {
             text = null;
-            if (!TryParseTextListId(textListName, out var listId, out var suffix))
+            if (!TryParseTextListId(textListName, out var listId, out var hasLegacySuffix))
             {
                 return false;
             }
@@ -123,9 +165,7 @@ namespace S7CommPlusDriver
                 return true;
             }
 
-            // Some CPU system-diagnostic placeholders use the TIA display name (for example 7W)
-            // while the runtime table stores the previous numeric id.
-            if (StringComparer.OrdinalIgnoreCase.Equals(suffix, "W") && listId > 0)
+            if (hasLegacySuffix && listId > 0)
             {
                 return TryResolve(listId - 1, value, languageId, out text);
             }
@@ -152,7 +192,7 @@ namespace S7CommPlusDriver
         private bool TryResolveInLanguage(int listId, long value, int languageId, out string text)
         {
             text = null;
-            if (!_listsByLanguageAndId.TryGetValue(Tuple.Create(languageId, listId), out var list))
+            if (!_listsByLanguageAndId.TryGetValue(CreateTextListKey(languageId, listId), out var list))
             {
                 return false;
             }
@@ -160,28 +200,57 @@ namespace S7CommPlusDriver
             return list.TryResolve(value, out text);
         }
 
-        private static bool TryParseTextListId(string textListName, out int listId, out string suffix)
+        private static List<int> CreateDistinctLanguageIds(IEnumerable<int> languageIds)
+        {
+            var result = new List<int>();
+            var seen = new HashSet<int>();
+            if (languageIds == null)
+            {
+                return result;
+            }
+            foreach (var languageId in languageIds)
+            {
+                if (seen.Add(languageId))
+                {
+                    result.Add(languageId);
+                }
+            }
+            return result;
+        }
+
+        private static long CreateTextListKey(int languageId, int listId)
+        {
+            return ((long)(uint)languageId << 32) | (uint)listId;
+        }
+
+        private static bool TryParseTextListId(string textListName, out int listId, out bool hasLegacySuffix)
         {
             listId = 0;
-            suffix = String.Empty;
+            hasLegacySuffix = false;
             if (String.IsNullOrWhiteSpace(textListName))
             {
                 return false;
             }
 
-            var pos = 0;
-            while (pos < textListName.Length && Char.IsDigit(textListName[pos]))
+            var position = 0;
+            while (position < textListName.Length && Char.IsDigit(textListName[position]))
             {
-                pos++;
+                var digit = textListName[position] - '0';
+                if (listId > (Int32.MaxValue - digit) / 10)
+                {
+                    return false;
+                }
+                listId = listId * 10 + digit;
+                position++;
             }
 
-            if (pos == 0)
+            if (position == 0)
             {
                 return false;
             }
-
-            suffix = textListName.Substring(pos);
-            return Int32.TryParse(textListName.Substring(0, pos), NumberStyles.None, CultureInfo.InvariantCulture, out listId);
+            hasLegacySuffix = position + 1 == textListName.Length &&
+                (textListName[position] == 'W' || textListName[position] == 'w');
+            return true;
         }
     }
 }

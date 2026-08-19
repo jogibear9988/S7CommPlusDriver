@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text;
 using S7CommPlusDriver.ClientApi;
 using Xunit;
 
@@ -51,6 +52,7 @@ namespace S7CommPlusDriver.Tests
             Assert.IsType<PlcTagInt>(tags["DB.Value"]);
             Assert.Equal(0x12345678U, tags["DB.Value"].Address.SymbolCrc);
             Assert.Equal("8A0E0001.10.3", tags["DB.Counters[2,0]"].Address.GetAccessString());
+            Assert.Same(tags.Keys.First(key => key == "DB.Value"), tags["DB.Value"].Name);
             Assert.Equal(0U, tags["DB.Counters[2,0]"].Address.SymbolCrc);
             Assert.False(tags.ContainsKey("DB.Missing"));
         }
@@ -98,6 +100,37 @@ namespace S7CommPlusDriver.Tests
             });
         }
 
+        /// <summary>Ensures version-two readers preserve access to catalogs written before root names were deduplicated.</summary>
+        [Fact]
+        public void ReadSupportsVersionOneCatalogs()
+        {
+            using var stream = new MemoryStream();
+            using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
+            {
+                writer.Write(Encoding.ASCII.GetBytes("S7PACT01"));
+                writer.Write(1);
+                WriteString(writer, "HASH-V1");
+                writer.Write(1);
+                WriteString(writer, "DB.Value");
+                writer.Write(true);
+                WriteString(writer, "DB.Value");
+                writer.Write(Softdatatype.S7COMMP_SOFTDATATYPE_BOOL);
+                writer.Write(0x12345678U);
+                writer.Write(0x8A0E0001U);
+                writer.Write(Ids.DB_ValueActual);
+                writer.Write(1);
+                writer.Write(0xFU);
+                writer.Write(0);
+            }
+            stream.Position = 0;
+
+            var catalog = S7CommPlusTagAccessorCatalog.ReadFrom(stream, "HASH-V1");
+            var tag = catalog.CreateTags(new[] { "DB.Value" })["DB.Value"];
+
+            Assert.Equal("8A0E0001.F", tag.Address.GetAccessString());
+            Assert.Equal(0x12345678U, tag.Address.SymbolCrc);
+        }
+
         /// <summary>Ensures a valid file cannot be used for an unverified or changed PLC program.</summary>
         [Fact]
         public void ReadRejectsProgramStructureHashMismatch()
@@ -140,6 +173,13 @@ namespace S7CommPlusDriver.Tests
             var exception = Assert.Throws<ArgumentException>(() => catalog.CreateTags(new[] { "DB.New" }));
 
             Assert.Contains("does not cover", exception.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void WriteString(BinaryWriter writer, string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            writer.Write(bytes.Length);
+            writer.Write(bytes);
         }
     }
 }

@@ -178,6 +178,54 @@ namespace S7CommPlusDriver.Tests
                 });
         }
 
+        [Fact]
+        public void TextListEntriesReuseStringsReferencedByTheSameLibraryOffset()
+        {
+            var listTable = new byte[26];
+            BinaryPrimitives.WriteUInt32LittleEndian(listTable.AsSpan(16), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(listTable.AsSpan(20), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(listTable.AsSpan(22), 16);
+            var entryTable = new byte[36];
+            BinaryPrimitives.WriteUInt32LittleEndian(entryTable.AsSpan(16), 2);
+            BinaryPrimitives.WriteUInt32LittleEndian(entryTable.AsSpan(20), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(entryTable.AsSpan(24), 8);
+            BinaryPrimitives.WriteUInt32LittleEndian(entryTable.AsSpan(28), 2);
+            BinaryPrimitives.WriteUInt32LittleEndian(entryTable.AsSpan(32), 8);
+            var stringTable = new byte[16];
+            WriteText(stringTable, 8, "Same");
+            var lists = new List<S7CommPlusTextList>();
+
+            var result = S7CommPlusTextListService.DecodeTextListLibrary(
+                listTable,
+                entryTable,
+                stringTable,
+                1031,
+                S7CommPlusTextListScope.LanguageSpecific,
+                lists);
+
+            Assert.Equal(0, result);
+            var list = Assert.Single(lists);
+            Assert.Same(list.Entries[0].Text, list.Entries[1].Text);
+        }
+
+        [Fact]
+        public void TextListResolutionUsesExactValuesBeforeRangesWithoutChangingEntryOrder()
+        {
+            var entries = new[]
+            {
+                new S7CommPlusTextListEntry(10, 20, "Range"),
+                new S7CommPlusTextListEntry(15, 15, "Exact"),
+                new S7CommPlusTextListEntry(1, 1, "First")
+            };
+            var list = new S7CommPlusTextList(1, 1031, S7CommPlusTextListScope.LanguageSpecific, entries);
+
+            Assert.True(list.TryResolve(15, out var exactText));
+            Assert.True(list.TryResolve(16, out var rangeText));
+            Assert.Equal("Exact", exactText);
+            Assert.Equal("Range", rangeText);
+            Assert.Equal(entries, list.Entries);
+        }
+
         private static void WriteText(byte[] destination, int offset, string value)
         {
             var bytes = Encoding.UTF8.GetBytes(value);

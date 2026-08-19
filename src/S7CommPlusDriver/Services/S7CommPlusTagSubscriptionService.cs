@@ -151,7 +151,7 @@ namespace S7CommPlusDriver
                 // before the LIDs, but that's wrong (coincidentally fits here in this special case).
                 // Get the number of IDs in advance, Sub-Area counts as one, and then count each LID.
                 // 0x8aaabbbb = aaa = unknown value, bbbb = number of fields in the 2nd part.
-                head |= (uint)(1 + tag.Address.LID.Count);
+                head |= (uint)(1 + tag.Address.LocalIdCount);
                 la.Add(head);
                 la.Add(tagReferenceId);
                 la.Add(0); // Unknown 1
@@ -159,9 +159,9 @@ namespace S7CommPlusDriver
                 la.Add(tag.Address.SymbolCrc);
                 // Count value in head starts from here
                 la.Add(tag.Address.AccessSubArea);
-                foreach(var li in tag.Address.LID)
+                for (var localIdIndex = 0; localIdIndex < tag.Address.LocalIdCount; localIdIndex++)
                 {
-                    la.Add(li);
+                    la.Add(tag.Address.GetLocalId(localIdIndex));
                 }
                 tagReferenceId++;
             }
