@@ -24,9 +24,11 @@ namespace S7CommPlusDriver
         /// <returns>error code (0 = ok)</returns>
         private int legitimate(ValueStruct serverSession, string password, string username = "")
         {
-            // S7-1214C  (6ES7 214-1AG40-0XB0)           1;6ES7 214-1AG40-0XB0 ;V4.5
-            // S7-1510SP (6ES7 510-1DJ01-0AB0)           1;6ES7 510-1DJ01-0AB0;V2.9
-            // S7-1507SF (6ES7 672-7FC01-0YA0)           1;6ES7 672-7FC01-0YA0;V21.9
+            // S7-1214C                         (6ES7 214-1AG40-0XB0)           1;6ES7 214-1AG40-0XB0 ;V4.5
+            // S7-1510SP                        (6ES7 510-1DJ01-0AB0)           1;6ES7 510-1DJ01-0AB0;V2.9
+            // S7-1507SF                        (6ES7 672-7FC01-0YA0)           1;6ES7 672-7FC01-0YA0;V21.9
+
+            // S7-PLCSIM Advanced V8.0 Upd1     (6ES7 SIM-01500-APLC)           1;6ES7 SIM-01500-APLC;R4.1
 
             // Parse device and firmware version
             // doc: https://cache.industry.siemens.com/dl/files/068/109769068/att_1329908/v4/109769068_UsingCertificatesWithTIAPortal_DOC_V2_1_en.pdf
@@ -46,7 +48,7 @@ namespace S7CommPlusDriver
             //  In addition, SINAMICS RT SW, as of version V6.1, and STARTDRIVE, as of version V17, support secure communication
             string sessionVersionPAOMString = ((ValueWString)serverSession.GetStructElement((uint)Ids.LID_SessionVersionSystemPAOMString)).GetValue();
             var reVersions = new Regex(
-                @"^[^;]*;[^;]*[17]\s?(\d{3}).*;[VS](\d{1,2}\.\d+)$",
+                @"^[^;]*;[^;]*[17]\s?(\d{3}).*;[VSR](\d{1,2}\.\d+)$",
                 RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase
             );
             Match m = reVersions.Match(sessionVersionPAOMString);
