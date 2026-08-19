@@ -1,7 +1,7 @@
 # S7CommPlus online multiplexing notes
 
 Status: implemented in the driver refactor. One `S7CommPlusClient` owns exactly one PLC connection. The library must not silently open additional PLC connections. If an application wants more physical PLC connections, it creates more clients explicitly.
-s
+
 - TIA opened two ES connections to the PLC, not one connection per watched block.
 - Online block view traffic used one long-lived watch connection.
 - Additional opened or expanded blocks created additional TIS jobs/subscriptions on that same watch connection.
