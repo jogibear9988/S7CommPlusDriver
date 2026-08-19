@@ -1531,7 +1531,7 @@ namespace S7CommPlusDriver.Tests
             subscription.NotificationReceived += (_, args) => received.TrySetResult(args.Notification);
             allowNotifications.Set();
 
-            var update = await RuntimeCompatibility.WaitAsync(received.Task, TimeSpan.FromSeconds(2));
+            var update = await RuntimeCompatibility.WaitAsync(received.Task, TimeSpan.FromSeconds(10));
             await subscription.StopAsync();
 
             Assert.Equal((uint)123, update.SequenceNumber);

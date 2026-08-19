@@ -253,8 +253,8 @@ namespace S7CommPlusDriver.Alarming
                 return;
             }
 
-            // TIA SupplyDataFormatterImpl.FormatPlusAlarmTexts uses this shape
-            // for standard element-type placeholders such as @2W%d@.
+            // Standard associated-value payloads use untyped blobs; the second blob
+            // contains packed values addressed by placeholder position and element width.
             if (blobs[0].BlobRootId != 0 || blobs[1].BlobRootId != 0)
             {
                 return;

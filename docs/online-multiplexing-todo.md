@@ -1,9 +1,7 @@
 # S7CommPlus online multiplexing notes
 
 Status: implemented in the driver refactor. One `S7CommPlusClient` owns exactly one PLC connection. The library must not silently open additional PLC connections. If an application wants more physical PLC connections, it creates more clients explicitly.
-
-Observed TIA behavior in `C:\Data\temp\Online CPU FA01.pcapng`:
-
+s
 - TIA opened two ES connections to the PLC, not one connection per watched block.
 - Online block view traffic used one long-lived watch connection.
 - Additional opened or expanded blocks created additional TIS jobs/subscriptions on that same watch connection.
@@ -33,8 +31,3 @@ Implemented driver changes:
 - Explicit helper APIs stay explicit.
   - Snapshot helpers may accept another `S7CommPlusClient`, but should not create one implicitly.
 - For online engineering features prefer `S7CommPlusDefaults.RemoteTsapEs`.
-
-Live-test rule:
-
-- Do not test against `10.0.10.100` or the production/FA01 CPU.
-- If live PLC testing is needed, use only `10.0.98.206`.
