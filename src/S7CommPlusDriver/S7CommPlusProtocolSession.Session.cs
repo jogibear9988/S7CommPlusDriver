@@ -13,6 +13,7 @@ namespace S7CommPlusDriver
         private S7CommPlusTagSubscriptionService _tagSubscriptions;
         private S7CommPlusAlarmSubscriptionService _alarmSubscriptions;
         private S7CommPlusTisWatchSubscriptionService _tisWatchSubscriptions;
+        private S7CommPlusTisTraceSubscriptionService _tisTraceSubscriptions;
         private S7CommPlusAlarmBrowseService _alarmBrowser;
         private S7CommPlusMetadataService _metadata;
         private S7CommPlusTextListService _textLists;
@@ -21,6 +22,7 @@ namespace S7CommPlusDriver
         private S7CommPlusTagSubscriptionService TagSubscriptions => _tagSubscriptions ??= new S7CommPlusTagSubscriptionService(ProtocolSession);
         private S7CommPlusAlarmSubscriptionService AlarmSubscriptions => _alarmSubscriptions ??= new S7CommPlusAlarmSubscriptionService(ProtocolSession);
         private S7CommPlusTisWatchSubscriptionService TisWatchSubscriptions => _tisWatchSubscriptions ??= new S7CommPlusTisWatchSubscriptionService(ProtocolSession);
+        private S7CommPlusTisTraceSubscriptionService TisTraceSubscriptions => _tisTraceSubscriptions ??= new S7CommPlusTisTraceSubscriptionService(ProtocolSession);
         private S7CommPlusAlarmBrowseService AlarmBrowser => _alarmBrowser ??= new S7CommPlusAlarmBrowseService(ProtocolSession);
         private S7CommPlusMetadataService Metadata => _metadata ??= new S7CommPlusMetadataService(ProtocolSession);
         private S7CommPlusTextListService TextLists => _textLists ??= new S7CommPlusTextListService(ProtocolSession, Metadata);
@@ -93,6 +95,34 @@ namespace S7CommPlusDriver
         int IS7CommPlusSession.GetCpuInfo(out S7CommPlusCpuInfo cpuInfo)
         {
             return Metadata.GetCpuInfo(out cpuInfo);
+        }
+
+        int IS7CommPlusSession.GetOnlineCapabilities(out byte[] capabilities)
+        {
+            capabilities = null;
+            var requests = new S7CommPlusProtocolRequests(ProtocolSession);
+            var result = requests.GetVariable(50u, 4196u, out var value);
+            if (result != 0)
+            {
+                return result;
+            }
+
+            if (value is ValueBlob blob)
+            {
+                var blobValue = blob.GetValue();
+                capabilities = blobValue == null
+                    ? Array.Empty<byte>()
+                    : (byte[])blobValue.Clone();
+                return 0;
+            }
+
+            if (value is ValueByteArray byteArray)
+            {
+                capabilities = (byte[])byteArray.GetValue().Clone();
+                return 0;
+            }
+
+            return S7Consts.errIsoInvalidPDU;
         }
 
         int IS7CommPlusSession.GetCpuState(out S7CommPlusCpuState cpuState)
@@ -192,6 +222,23 @@ namespace S7CommPlusDriver
         int IS7CommPlusSession.DeleteTisWatchSubscription(uint subscriptionObjectId)
         {
             return TisWatchSubscriptions.Delete(subscriptionObjectId);
+        }
+
+        int IS7CommPlusSession.CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint subscriptionObjectId)
+        {
+            return TisTraceSubscriptions.Create(request, out subscriptionObjectId);
+        }
+
+        int IS7CommPlusSession.WaitForTisTraceNotifications(uint subscriptionObjectId, int timeoutMilliseconds, out List<S7CommPlusTisTraceNotification> notifications)
+        {
+            return TisTraceSubscriptions.WaitForNotifications(subscriptionObjectId, timeoutMilliseconds, out notifications);
+        }
+
+        string IS7CommPlusSession.LastTisTraceDiagnostic => TisTraceSubscriptions.LastDiagnostic;
+
+        int IS7CommPlusSession.DeleteTisTraceSubscription(uint subscriptionObjectId)
+        {
+            return TisTraceSubscriptions.Delete(subscriptionObjectId);
         }
 
         private sealed class ProtocolSessionAdapter : IS7CommPlusProtocolSession

@@ -29,6 +29,7 @@ namespace S7CommPlusDriver
         int GetSymbolComments(uint relationId, out S7CommPlusSymbolCommentCatalog comments);
         PlcTag GetPlcTagBySymbol(string symbol);
         int GetCpuInfo(out S7CommPlusCpuInfo cpuInfo);
+        int GetOnlineCapabilities(out byte[] capabilities);
         int GetCpuState(out S7CommPlusCpuState cpuState);
         int GetCpuCycleTime(out S7CommPlusCpuCycleTime cycleTime);
         int GetCpuMemoryUsage(out S7CommPlusCpuMemoryUsage memoryUsage);
@@ -50,5 +51,9 @@ namespace S7CommPlusDriver
         string LastTisWatchDiagnostic { get; }
         string LastAlarmSubscriptionDiagnostic { get; }
         int DeleteTisWatchSubscription(uint subscriptionObjectId);
+        int CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint subscriptionObjectId);
+        int WaitForTisTraceNotifications(uint subscriptionObjectId, int timeoutMilliseconds, out List<S7CommPlusTisTraceNotification> notifications);
+        string LastTisTraceDiagnostic { get; }
+        int DeleteTisTraceSubscription(uint subscriptionObjectId);
     }
 }

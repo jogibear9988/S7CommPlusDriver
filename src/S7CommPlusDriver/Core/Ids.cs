@@ -237,6 +237,7 @@ namespace S7CommPlusDriver
         public const int AbstractTisJob_itsTisSubsystem = 2698;
         public const int AbstractTisJob_Class_Rid = 2700;
         public const int TisWatchJob_Class_Rid = 2709;
+        public const int TisContinuingJob_Class_Rid = 2708;
         public const int TisSubscriptionRef_IncrementNotificationCredit = 2711;
         public const int TisSubscriptionRef_Class_Rid = 2712;
         public const int DAI_AlarmTexts_Rid = 2715;
@@ -266,6 +267,10 @@ namespace S7CommPlusDriver
         public const int ASObjectES_Comment = 4288;
         public const int AlarmSubsystem_itsUpdateRequestToAllJob = 4569;
         public const int AbstractTisJob_LargeBufferMemorySize = 7647;
+        public const int TisTraceJob_ClientData = 7648;
+        public const int TisTraceJob_Class_Rid = 8138;
+        public const int TisTraceJob_Interpretation = 8140;
+        public const int TisTraceJob_LargeBuffer = 8142;
         public const int AlarmSubscriptionRef_AlarmDomain2 = 7731;
         public const int AlarmSubscr_AlarmDomain2 = AlarmSubscriptionRef_AlarmDomain2;
         public const int DAI_HmiInfo = 7813;

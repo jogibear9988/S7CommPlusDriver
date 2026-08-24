@@ -517,6 +517,19 @@ namespace S7CommPlusDriver
             }, cancellationToken);
         }
 
+        /// <summary>
+        /// Reads the PLC's raw TIS online-capabilities blob from RID 50, AID 4196.
+        /// </summary>
+        public Task<byte[]> GetOnlineCapabilitiesAsync(CancellationToken cancellationToken = default)
+        {
+            return ExecuteReadOperationAsync("GetOnlineCapabilities", session =>
+            {
+                var error = session.GetOnlineCapabilities(out var capabilities);
+                ThrowIfError("GetOnlineCapabilities", error);
+                return capabilities ?? Array.Empty<byte>();
+            }, cancellationToken);
+        }
+
         public Task<S7CommPlusCpuState> GetCpuStateAsync(CancellationToken cancellationToken = default)
         {
             return ExecuteReadOperationAsync("GetCpuState", session =>
@@ -776,6 +789,51 @@ namespace S7CommPlusDriver
                 {
                     SetState(S7CommPlusConnectionState.Faulted, ex);
                 }
+                subscription.MarkFaulted(ex);
+                throw;
+            }
+            finally
+            {
+                _operationGate.Release();
+            }
+        }
+
+        public async Task<S7CommPlusTisTraceSubscription> OpenTisTraceAsync(S7CommPlusTisTraceRequest request, S7CommPlusSubscriptionOptions options = null, CancellationToken cancellationToken = default)
+        {
+            if (request == null)
+                throw new ArgumentNullException(nameof(request));
+
+            request.Validate();
+            var traceRequest = request.Clone();
+            var subscriptionOptions = (options ?? new S7CommPlusSubscriptionOptions()).Clone();
+            subscriptionOptions.Validate(requireCycleTime: false);
+            var subscription = new S7CommPlusTisTraceSubscription();
+            var operationTimeout = _operationTimeout.Value ?? _options.RequestTimeout;
+
+            await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ThrowIfDisposed();
+                await EnsureConnectedCoreAsync(cancellationToken).ConfigureAwait(false);
+                uint subscriptionObjectId = 0;
+                var error = await RunOperationAttemptAsync(
+                    "CreateTisTraceSubscription",
+                    session => session.CreateTisTraceSubscription(traceRequest, out subscriptionObjectId),
+                    operationTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                var operation = String.IsNullOrWhiteSpace(traceRequest.LastLifecycleStage)
+                    ? "CreateTisTraceSubscription"
+                    : $"CreateTisTraceSubscription ({traceRequest.LastLifecycleStage})";
+                ThrowIfError(operation, error);
+
+                subscription.Start(token => RunTisTraceSubscriptionLoopAsync(subscription, subscriptionOptions, subscriptionObjectId, token));
+                return subscription;
+            }
+            catch (S7CommPlusException ex)
+            {
+                RaiseCommunicationError(ex);
+                if (ex.IsTransient)
+                    SetState(S7CommPlusConnectionState.Faulted, ex);
                 subscription.MarkFaulted(ex);
                 throw;
             }
@@ -1591,6 +1649,63 @@ namespace S7CommPlusDriver
             finally
             {
                 await TryDeleteSubscriptionAsync("DeleteTisWatchSubscription", subscription, subscriptionOptions, () => _session.DeleteTisWatchSubscription(subscriptionObjectId)).ConfigureAwait(false);
+            }
+        }
+
+        private async Task RunTisTraceSubscriptionLoopAsync(S7CommPlusTisTraceSubscription subscription, S7CommPlusSubscriptionOptions subscriptionOptions, uint subscriptionObjectId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var consecutiveTimeouts = 0;
+                while (!subscription.IsStopRequested)
+                {
+                    var result = await RunWithTimeoutAsync(
+                        "WaitForTisTraceNotifications",
+                        () =>
+                        {
+                            var error = _session.WaitForTisTraceNotifications(
+                                subscriptionObjectId,
+                                subscriptionOptions.NotificationTimeoutMilliseconds,
+                                out var notifications);
+                            return (error, notifications);
+                        },
+                        subscriptionOptions.NotificationTimeout + TimeSpan.FromSeconds(1),
+                        CancellationToken.None).ConfigureAwait(false);
+
+                    if (result.error == S7Consts.errCliJobTimeout || result.error == S7Consts.errTCPReceiveTimeout)
+                    {
+                        consecutiveTimeouts++;
+                        if (subscriptionOptions.MaxConsecutiveTimeoutsBeforeFault > 0
+                            && consecutiveTimeouts >= subscriptionOptions.MaxConsecutiveTimeoutsBeforeFault)
+                            throw CreateException("WaitForTisTraceNotifications", result.error);
+                        continue;
+                    }
+
+                    ThrowIfError("WaitForTisTraceNotifications", result.error);
+                    consecutiveTimeouts = 0;
+                    foreach (var notification in result.notifications ?? Enumerable.Empty<S7CommPlusTisTraceNotification>())
+                        subscription.Publish(notification);
+                }
+            }
+            catch (S7CommPlusException ex)
+            {
+                RaiseCommunicationError(ex);
+                if (ex.IsTransient)
+                    SetState(S7CommPlusConnectionState.Faulted, ex);
+                subscription.MarkFaulted(ex);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var wrapped = new S7CommPlusConnectionException("WaitForTisTraceNotifications", Endpoint, S7Consts.errCliFunctionRefused, true, $"Trace notification failed for PLC {Endpoint}.", ex);
+                RaiseCommunicationError(wrapped);
+                SetState(S7CommPlusConnectionState.Faulted, wrapped);
+                subscription.MarkFaulted(wrapped);
+                throw wrapped;
+            }
+            finally
+            {
+                await TryDeleteSubscriptionAsync("DeleteTisTraceSubscription", subscription, subscriptionOptions, () => _session.DeleteTisTraceSubscription(subscriptionObjectId)).ConfigureAwait(false);
             }
         }
 
