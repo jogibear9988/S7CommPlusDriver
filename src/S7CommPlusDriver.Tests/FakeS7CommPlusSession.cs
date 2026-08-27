@@ -32,6 +32,9 @@ namespace S7CommPlusDriver.Tests
         public int TisWatchSubscriptionCreateCount { get; private set; }
         public int TisWatchSubscriptionWaitCount { get; private set; }
         public int TisWatchSubscriptionDeleteCount { get; private set; }
+        public int TisTraceSubscriptionCreateCount { get; private set; }
+        public int TisTraceSubscriptionWaitCount { get; private set; }
+        public int TisTraceSubscriptionDeleteCount { get; private set; }
         public int LastActiveAlarmsLanguageId { get; private set; }
         public int RequestTimeoutMilliseconds { get; private set; }
         public List<int> RequestTimeoutHistory { get; } = new List<int>();
@@ -39,12 +42,15 @@ namespace S7CommPlusDriver.Tests
         public List<uint> CreatedTagSubscriptionIds { get; } = new List<uint>();
         public List<uint> CreatedAlarmSubscriptionIds { get; } = new List<uint>();
         public List<uint> CreatedTisWatchSubscriptionIds { get; } = new List<uint>();
+        public List<uint> CreatedTisTraceSubscriptionIds { get; } = new List<uint>();
         public List<uint> WaitedTagSubscriptionIds { get; } = new List<uint>();
         public List<uint> WaitedAlarmSubscriptionIds { get; } = new List<uint>();
         public List<uint> WaitedTisWatchSubscriptionIds { get; } = new List<uint>();
+        public List<uint> WaitedTisTraceSubscriptionIds { get; } = new List<uint>();
         public List<uint> DeletedTagSubscriptionIds { get; } = new List<uint>();
         public List<uint> DeletedAlarmSubscriptionIds { get; } = new List<uint>();
         public List<uint> DeletedTisWatchSubscriptionIds { get; } = new List<uint>();
+        public List<uint> DeletedTisTraceSubscriptionIds { get; } = new List<uint>();
         private uint _nextSubscriptionObjectId = 1;
 
         public Func<S7CommPlusClientOptions, int>? ConnectHandler { get; set; }
@@ -58,6 +64,7 @@ namespace S7CommPlusDriver.Tests
         public Func<(int Error, List<S7CommPlusAlarm> Alarms)>? ActiveAlarmsHandler { get; set; }
         public Func<string, PlcTag>? GetTagHandler { get; set; }
         public Func<(int Error, S7CommPlusCpuInfo CpuInfo)>? CpuInfoHandler { get; set; }
+        public Func<(int Error, byte[] Capabilities)>? OnlineCapabilitiesHandler { get; set; }
         public Func<(int Error, S7CommPlusCpuState CpuState)>? CpuStateHandler { get; set; }
         public Func<(int Error, S7CommPlusCpuCycleTime CycleTime)>? CpuCycleTimeHandler { get; set; }
         public Func<(int Error, S7CommPlusCpuMemoryUsage MemoryUsage)>? CpuMemoryUsageHandler { get; set; }
@@ -79,7 +86,12 @@ namespace S7CommPlusDriver.Tests
         public Func<int, (int Error, List<S7CommPlusTisWatchNotification> Notifications)>? WaitForTisWatchSubscriptionHandler { get; set; }
         public Func<uint, int, (int Error, List<S7CommPlusTisWatchNotification> Notifications)>? WaitForTisWatchSubscriptionByIdHandler { get; set; }
         public Func<int>? DeleteTisWatchSubscriptionHandler { get; set; }
+        public Func<S7CommPlusTisTraceRequest, int>? CreateTisTraceSubscriptionHandler { get; set; }
+        public Func<int, (int Error, List<S7CommPlusTisTraceNotification> Notifications)>? WaitForTisTraceSubscriptionHandler { get; set; }
+        public Func<uint, int, (int Error, List<S7CommPlusTisTraceNotification> Notifications)>? WaitForTisTraceSubscriptionByIdHandler { get; set; }
+        public Func<int>? DeleteTisTraceSubscriptionHandler { get; set; }
         public string LastTisWatchDiagnostic { get; set; } = "";
+        public string LastTisTraceDiagnostic { get; set; } = "";
         public string LastAlarmSubscriptionDiagnostic { get; set; } = "";
 
         public int Connect(S7CommPlusClientOptions options)
@@ -172,6 +184,13 @@ namespace S7CommPlusDriver.Tests
         {
             var result = CpuInfoHandler?.Invoke() ?? (0, new S7CommPlusCpuInfo { PlcName = "TestCpu" });
             cpuInfo = result.CpuInfo;
+            return result.Error;
+        }
+
+        public int GetOnlineCapabilities(out byte[] capabilities)
+        {
+            var result = OnlineCapabilitiesHandler?.Invoke() ?? (0, Array.Empty<byte>());
+            capabilities = result.Capabilities;
             return result.Error;
         }
 
@@ -352,6 +371,37 @@ namespace S7CommPlusDriver.Tests
             TisWatchSubscriptionDeleteCount++;
             DeletedTisWatchSubscriptionIds.Add(subscriptionObjectId);
             return DeleteTisWatchSubscriptionHandler?.Invoke() ?? 0;
+        }
+
+        public int CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint subscriptionObjectId)
+        {
+            subscriptionObjectId = 0;
+            TisTraceSubscriptionCreateCount++;
+            var result = CreateTisTraceSubscriptionHandler?.Invoke(request) ?? 0;
+            if (result == 0)
+            {
+                subscriptionObjectId = _nextSubscriptionObjectId++;
+                CreatedTisTraceSubscriptionIds.Add(subscriptionObjectId);
+            }
+            return result;
+        }
+
+        public int WaitForTisTraceNotifications(uint subscriptionObjectId, int timeoutMilliseconds, out List<S7CommPlusTisTraceNotification> notifications)
+        {
+            TisTraceSubscriptionWaitCount++;
+            WaitedTisTraceSubscriptionIds.Add(subscriptionObjectId);
+            var result = WaitForTisTraceSubscriptionByIdHandler?.Invoke(subscriptionObjectId, timeoutMilliseconds)
+                ?? WaitForTisTraceSubscriptionHandler?.Invoke(timeoutMilliseconds)
+                ?? (S7Consts.errCliJobTimeout, new List<S7CommPlusTisTraceNotification>());
+            notifications = result.Notifications;
+            return result.Error;
+        }
+
+        public int DeleteTisTraceSubscription(uint subscriptionObjectId)
+        {
+            TisTraceSubscriptionDeleteCount++;
+            DeletedTisTraceSubscriptionIds.Add(subscriptionObjectId);
+            return DeleteTisTraceSubscriptionHandler?.Invoke() ?? 0;
         }
     }
 }
