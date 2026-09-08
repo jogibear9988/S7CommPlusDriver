@@ -13,6 +13,8 @@ namespace S7CommPlusDriver.Tests
         public int ConnectError { get; set; }
         public int SendError { get; set; }
         public int EmptyReceiveDelayMilliseconds { get; set; }
+        public Exception? ReceiveException { get; set; }
+        public Exception? CloseException { get; set; }
         public List<byte[]> Sent { get; } = new List<byte[]>();
         public (string Address, int Port, int ConnectTimeout, int ReceiveTimeout, int SendTimeout) LastConnect { get; private set; }
         public (int ReceiveTimeout, int SendTimeout)? UpdatedTimeouts { get; private set; }
@@ -58,6 +60,8 @@ namespace S7CommPlusDriver.Tests
 
         public int Receive(byte[] buffer, int start, int size)
         {
+            if (ReceiveException != null)
+                throw ReceiveException;
             if (!Connected)
             {
                 return S7Consts.errTCPNotConnected;
@@ -84,6 +88,8 @@ namespace S7CommPlusDriver.Tests
         {
             CloseCount++;
             Connected = false;
+            if (CloseException != null)
+                throw CloseException;
             return 0;
         }
 
