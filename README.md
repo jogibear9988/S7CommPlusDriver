@@ -255,10 +255,28 @@ catalog locally without another PLC request.
 The built-in connection defaults match Siemens S7CommPlus HMI communication:
 ISO-on-TCP port `S7CommPlusDefaults.IsoTcpPort` (`102`), local TSAP
 `S7CommPlusDefaults.LocalTsap` (`0x0600`), and remote TSAP
-`S7CommPlusDefaults.RemoteTsapHmi` (`SIMATIC-ROOT-HMI`). Project/engineering
-captures sometimes use `S7CommPlusDefaults.RemoteTsapEs`
-(`SIMATIC-ROOT-ES`). Remote TSAP values are validated as ASCII COTP
-parameters before a socket is opened.
+`S7CommPlusDefaults.RemoteTsapHmi` (`SIMATIC-ROOT-HMI`). The default
+`S7CommPlusSessionRole.Hmi` applies to both TLS and legacy challenge
+connections; legacy connections also advertise the HMI server-session role.
+This prevents ordinary driver connections from claiming an engineering session
+that can block TIA Portal hardware downloads.
+
+Select engineering mode explicitly when an engineering-class connection is
+required:
+
+```csharp
+var options = new S7CommPlusClientOptions
+{
+    Address = "10.0.110.120",
+    SessionRole = S7CommPlusSessionRole.EngineeringSystem
+};
+```
+
+Engineering mode selects `S7CommPlusDefaults.RemoteTsapEs`
+(`SIMATIC-ROOT-ES`) and, in legacy mode, the engineering server-session role.
+`RemoteTsap` remains available as a low-level override for nonstandard PLC
+configurations. Remote TSAP values are validated as ASCII COTP parameters
+before a socket is opened.
 
 ## CPU Runtime Status and Control
 

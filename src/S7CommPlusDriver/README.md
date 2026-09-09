@@ -12,7 +12,7 @@ Use `S7CommPlusClient` for new applications. It provides async connect, browse, 
 
 The managed BouncyCastle backend is the default TLS implementation unless `S7CommPlusClientOptions.TlsBackend` is set explicitly. On `net48`, `net8.0`, and `net9.0`, the default security mode is `Auto`: it tries TLS first and reconnects with HarpoS7-derived legacy challenge authentication if the PLC rejects TLS. Set the mode to `Tls` to prohibit fallback, or `LegacyChallenge` to skip the TLS attempt. `net6.0` remains TLS-only. .NET Framework 4.8 uses the managed BouncyCastle backend because the native OpenSSL resolver requires modern .NET.
 
-Default connection parameters are exposed through `S7CommPlusDefaults`: ISO-on-TCP port `102`, local TSAP `0x0600`, HMI remote TSAP `SIMATIC-ROOT-HMI`, and engineering remote TSAP `SIMATIC-ROOT-ES`. Remote TSAP values are validated as ASCII COTP parameters before connecting.
+Default connection parameters are exposed through `S7CommPlusDefaults`: ISO-on-TCP port `102`, local TSAP `0x0600`, HMI remote TSAP `SIMATIC-ROOT-HMI`, and engineering remote TSAP `SIMATIC-ROOT-ES`. `S7CommPlusClientOptions.SessionRole` defaults to `S7CommPlusSessionRole.Hmi` for both TLS and legacy challenge connections. Set it to `S7CommPlusSessionRole.EngineeringSystem` only when an engineering-class session is required; such a session can prevent TIA Portal from downloading hardware configuration while the driver remains connected. An explicitly assigned `RemoteTsap` overrides the standard TSAP selected by the role.
 
 ## Older PLCs / Legacy Challenge Auth
 

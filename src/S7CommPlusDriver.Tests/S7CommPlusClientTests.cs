@@ -999,6 +999,59 @@ namespace S7CommPlusDriver.Tests
         }
 
         [Fact]
+        public void HmiIsDefaultSessionRoleForTlsAndLegacyConnections()
+        {
+            var options = new S7CommPlusClientOptions();
+
+            Assert.Equal(S7CommPlusSessionRole.Hmi, options.SessionRole);
+            Assert.Equal(S7CommPlusDefaults.RemoteTsapHmi, options.RemoteTsap);
+            Assert.Equal(LegacyServerSessionRole.Hmi, options.LegacySessionRole);
+        }
+
+        [Fact]
+        public void EngineeringSessionRoleSelectsEngineeringTsapAndLegacyRole()
+        {
+            var options = new S7CommPlusClientOptions
+            {
+                SessionRole = S7CommPlusSessionRole.EngineeringSystem
+            };
+
+            Assert.Equal(S7CommPlusDefaults.RemoteTsapEs, options.RemoteTsap);
+            Assert.Equal(LegacyServerSessionRole.EngineeringSystem, options.LegacySessionRole);
+        }
+
+        [Fact]
+        public void ExplicitRemoteTsapOverridesSessionRoleDefault()
+        {
+            var options = new S7CommPlusClientOptions
+            {
+                SessionRole = S7CommPlusSessionRole.EngineeringSystem,
+                RemoteTsap = "CUSTOM-TSAP"
+            };
+
+            Assert.Equal("CUSTOM-TSAP", options.RemoteTsap);
+            Assert.Equal(LegacyServerSessionRole.EngineeringSystem, options.LegacySessionRole);
+
+            options.RemoteTsap = null;
+
+            Assert.Equal(S7CommPlusDefaults.RemoteTsapEs, options.RemoteTsap);
+        }
+
+        [Fact]
+        public void SessionRoleMustBeSupported()
+        {
+            var ex = Assert.Throws<ArgumentOutOfRangeException>(() => new S7CommPlusClient(
+                new S7CommPlusClientOptions
+                {
+                    Address = "127.0.0.1",
+                    SessionRole = (S7CommPlusSessionRole)99
+                },
+                () => new FakeS7CommPlusSession()));
+
+            Assert.Equal("SessionRole", ex.ParamName);
+        }
+
+        [Fact]
         public void LegacySessionKeyRefreshDefaultsToTwentyFiveMinutes()
         {
             var options = new S7CommPlusClientOptions();

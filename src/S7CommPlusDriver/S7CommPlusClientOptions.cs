@@ -8,10 +8,28 @@ namespace S7CommPlusDriver
 {
     public sealed class S7CommPlusClientOptions
     {
+        private string _remoteTsap;
+
         public string Address { get; set; } = string.Empty;
         public int Port { get; set; } = S7CommPlusDefaults.IsoTcpPort;
         public ushort LocalTsap { get; set; } = S7CommPlusDefaults.LocalTsap;
-        public string RemoteTsap { get; set; } = S7CommPlusDefaults.RemoteTsapHmi;
+        /// <summary>
+        /// Gets or sets the client role used for TLS and legacy challenge connections.
+        /// </summary>
+        /// <remarks>
+        /// HMI is the default so ordinary driver connections do not claim an engineering session on the PLC.
+        /// The role selects the matching standard remote TSAP unless <see cref="RemoteTsap"/> is explicitly set.
+        /// </remarks>
+        public S7CommPlusSessionRole SessionRole { get; set; } = S7CommPlusSessionRole.Hmi;
+        /// <summary>
+        /// Gets or sets a custom remote TSAP. When not explicitly set, the TSAP is derived from <see cref="SessionRole"/>.
+        /// Assign <see langword="null"/> to return to the role-derived TSAP.
+        /// </summary>
+        public string RemoteTsap
+        {
+            get => _remoteTsap ?? GetDefaultRemoteTsap(SessionRole);
+            set => _remoteTsap = value;
+        }
         public string Password { get; set; } = string.Empty;
         public string Username { get; set; } = string.Empty;
         public TimeSpan ConnectTimeout { get; set; } = S7CommPlusDefaults.ConnectTimeout;
@@ -70,6 +88,9 @@ namespace S7CommPlusDriver
         internal int BrowseTimeoutMilliseconds => ToPositiveMilliseconds(BrowseTimeout, nameof(BrowseTimeout));
         internal int LegacySessionKeyRefreshIntervalMilliseconds => ToPositiveMilliseconds(LegacySessionKeyRefreshInterval, nameof(LegacySessionKeyRefreshInterval));
         internal byte[] RemoteTsapBytes => Encoding.ASCII.GetBytes(RemoteTsap ?? string.Empty);
+        internal LegacyServerSessionRole LegacySessionRole => SessionRole == S7CommPlusSessionRole.Hmi
+            ? LegacyServerSessionRole.Hmi
+            : LegacyServerSessionRole.EngineeringSystem;
         internal string LegacyPublicKeyFingerprintOverride { get; set; }
 
         internal S7CommPlusClientOptions Clone()
@@ -104,6 +125,10 @@ namespace S7CommPlusDriver
             if (string.IsNullOrWhiteSpace(RemoteTsap))
             {
                 throw new ArgumentException("Remote TSAP is required.", nameof(RemoteTsap));
+            }
+            if (!Enum.IsDefined(typeof(S7CommPlusSessionRole), SessionRole))
+            {
+                throw new ArgumentOutOfRangeException(nameof(SessionRole), "Session role is not supported.");
             }
             foreach (var character in RemoteTsap)
             {
@@ -155,6 +180,13 @@ namespace S7CommPlusDriver
                 _ = LegacySessionKeyRefreshIntervalMilliseconds;
             }
             Logger ??= NullLogger.Instance;
+        }
+
+        private static string GetDefaultRemoteTsap(S7CommPlusSessionRole sessionRole)
+        {
+            return sessionRole == S7CommPlusSessionRole.EngineeringSystem
+                ? S7CommPlusDefaults.RemoteTsapEs
+                : S7CommPlusDefaults.RemoteTsapHmi;
         }
 
         private static bool IsLegacyPublicKeyId(string value)

@@ -40,31 +40,7 @@ namespace S7CommPlusDriver
         {
             m_LegacyPublicKeyFallbackFingerprints = null;
             m_LegacyAttemptedPublicKeyFingerprint = null;
-            var usesEngineeringTsap = string.Equals(options.RemoteTsap, LegacyOmsConstants.EngineeringTsap, StringComparison.Ordinal);
-            var res = ConnectLegacyChallengeWithPublicKeyFallback(options, LegacyServerSessionRole.EngineeringSystem);
-            if (res == S7Consts.errS7CommPlusLegacyAuthentication)
-            {
-                options.Logger.LogDebug("Legacy S7CommPlus ES session role was rejected by PLC {Address}:{Port}; retrying HMI session role.", options.Address, options.Port);
-                res = ConnectLegacyChallengeWithPublicKeyFallback(options, LegacyServerSessionRole.Hmi);
-            }
-
-            if (res != 0 && !usesEngineeringTsap && string.Equals(options.RemoteTsap, LegacyOmsConstants.HmiTsap, StringComparison.Ordinal))
-            {
-                var engineeringOptions = options.Clone();
-                engineeringOptions.RemoteTsap = LegacyOmsConstants.EngineeringTsap;
-                options.Logger.LogDebug(
-                    "Legacy S7CommPlus connection to PLC {Address}:{Port} failed with {ErrorCode}; retrying alternate TSAP {RemoteTsap}.",
-                    options.Address,
-                    options.Port,
-                    res,
-                    engineeringOptions.RemoteTsap);
-                res = ConnectLegacyChallengeWithPublicKeyFallback(engineeringOptions, LegacyServerSessionRole.EngineeringSystem);
-                if (res == S7Consts.errS7CommPlusLegacyAuthentication)
-                {
-                    options.Logger.LogDebug("Legacy S7CommPlus alternate ES session role was rejected by PLC {Address}:{Port}; retrying HMI session role on alternate TSAP.", options.Address, options.Port);
-                    res = ConnectLegacyChallengeWithPublicKeyFallback(engineeringOptions, LegacyServerSessionRole.Hmi);
-                }
-            }
+            var res = ConnectLegacyChallengeWithPublicKeyFallback(options, options.LegacySessionRole);
 
             if (res == 0 &&
                 options.LegacyPublicKeyResolver == null &&
