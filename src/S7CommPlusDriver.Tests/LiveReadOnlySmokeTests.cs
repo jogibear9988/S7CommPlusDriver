@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Xunit;
@@ -56,6 +58,7 @@ namespace S7CommPlusDriver.Tests
 
             Assert.NotNull(cpuInfo);
             Assert.NotEmpty(vars);
+            _output.WriteLine($"CPU model={cpuInfo.CpuMlfb ?? "<unknown>"}, firmware={cpuInfo.CpuFirmware}, browsed symbols={vars.Count}.");
 
             if (ReadOptionalBoolean("S7COMMPLUS_LIVE_EXTENDED_METADATA"))
             {
@@ -69,12 +72,84 @@ namespace S7CommPlusDriver.Tests
                 Assert.NotEmpty(textLists.TextLists);
             }
 
+            if (ReadOptionalBoolean("S7COMMPLUS_LIVE_TRACES"))
+            {
+                var includeResults = ReadOptionalBoolean("S7COMMPLUS_LIVE_TRACE_RESULTS");
+                var traces = await client.GetInstalledTracesAsync(new S7CommPlusTraceQueryOptions
+                {
+                    IncludeResultData = includeResults
+                });
+
+                Assert.NotNull(traces);
+                Assert.All(traces, trace =>
+                {
+                    Assert.NotNull(trace);
+                    Assert.False(string.IsNullOrWhiteSpace(trace.Reference.PersistentId));
+                    Assert.False(string.IsNullOrWhiteSpace(trace.Reference.Name));
+                    Assert.NotEqual(0u, trace.Reference.ObjectId);
+                    Assert.Equal(includeResults, trace.ResultDataIncluded);
+                });
+                Assert.Equal(
+                    traces.Count,
+                    traces.Select(trace => trace.Reference.PersistentId).Distinct(StringComparer.Ordinal).Count());
+
+                _output.WriteLine(
+                    $"Discovered {traces.Count} installed trace job(s); result buffers requested={includeResults}; " +
+                    $"diagnostic={client.LastTraceDiagnostic}.");
+                foreach (var trace in traces)
+                {
+                    _output.WriteLine(
+                        $"Trace '{trace.Reference.Name}': classId={trace.ClassId}, classFlags={trace.ClassFlags}, attributeId={trace.AttributeId}, " +
+                        $"state={trace.State}, enabled={trace.Enabled}, continuing={trace.ContinuingJob}, " +
+                        $"allocatedBufferSize={trace.AllocatedBufferSize?.ToString() ?? "<unknown>"}, " +
+                        $"resultBytes={trace.RawResult.Length}, bufferBytes={trace.RawLargeBuffer.Length}.");
+                }
+
+                var storedMeasurements = await client.GetStoredTraceMeasurementsAsync();
+                Assert.NotNull(storedMeasurements);
+                _output.WriteLine($"Discovered {storedMeasurements.Count} retained trace measurement(s).");
+
+                var fixtureDirectory = Environment.GetEnvironmentVariable("S7COMMPLUS_LIVE_TRACE_FIXTURE_DIRECTORY");
+                if (!string.IsNullOrWhiteSpace(fixtureDirectory))
+                {
+                    Assert.True(includeResults,
+                        "S7COMMPLUS_LIVE_TRACE_RESULTS must be true when exporting trace fixtures.");
+                    var fullFixtureDirectory = Path.GetFullPath(fixtureDirectory);
+                    Directory.CreateDirectory(fullFixtureDirectory);
+                    for (var index = 0; index < traces.Count; index++)
+                    {
+                        var trace = traces[index];
+                        var fixturePath = Path.Combine(
+                            fullFixtureDirectory,
+                            $"s7commplus-trace-{index:D3}-{Guid.NewGuid():N}.txt");
+                        WriteTraceFixture(fixturePath, cpuInfo, trace);
+                        _output.WriteLine($"Wrote trace fixture: {fixturePath}");
+                    }
+                }
+            }
+
             var tagNames = Environment.GetEnvironmentVariable("S7COMMPLUS_LIVE_TAGS");
             if (!string.IsNullOrWhiteSpace(tagNames))
             {
                 var requested = RuntimeCompatibility.SplitAndTrim(tagNames, ';');
+                foreach (var variable in vars.Where(item => requested.Contains(item.Name, StringComparer.Ordinal)))
+                {
+                    _output.WriteLine(
+                        $"Browsed tag '{variable.Name}': datatype={variable.Softdatatype}, access={variable.AccessSequence}, " +
+                        $"optAddress={variable.OptAddress}, optBit={variable.OptBitoffset}, " +
+                        $"nonOptAddress={variable.NonOptAddress}, nonOptBit={variable.NonOptBitoffset}.");
+                }
                 var tagTasks = requested.Select(symbol => client.GetTagBySymbolAsync(symbol)).ToArray();
                 var tags = await Task.WhenAll(tagTasks);
+                foreach (var tag in tags)
+                {
+                    _output.WriteLine(
+                        $"Resolved tag '{tag.Name}': datatype={tag.Datatype}, symbolCrc={tag.Address.SymbolCrc}, " +
+                        $"area={tag.Address.AccessArea}, subArea={tag.Address.AccessSubArea}, " +
+                        $"localIds=[{string.Join(",", tag.Address.LID)}], traceAddress={tag.HasTraceAddressMetadata}, " +
+                        $"optAddress={tag.TraceOptimizedByteOffset}, optBit={tag.TraceOptimizedBitOffset}, " +
+                        $"nonOptAddress={tag.TraceNonOptimizedByteOffset}, nonOptBit={tag.TraceNonOptimizedBitOffset}.");
+                }
                 var readResult = await client.ReadAsync(tags);
                 Assert.NotEmpty(tags);
                 Assert.All(readResult.Items, item => Assert.True(item.IsSuccess, $"Tag {item.Tag.Name} read failed with item error {item.ItemError}."));
@@ -89,6 +164,42 @@ namespace S7CommPlusDriver.Tests
 
             await client.DisconnectAsync();
         }
+
+        private static void WriteTraceFixture(
+            string path,
+            S7CommPlusCpuInfo cpuInfo,
+            S7CommPlusInstalledTrace trace)
+        {
+            var lines = new[]
+            {
+                "Format=S7CommPlusDriver.TraceFixture.1",
+                $"CpuMlfbBase64={EncodeText(cpuInfo.CpuMlfb)}",
+                $"CpuFirmware={cpuInfo.CpuFirmware}",
+                $"NameBase64={EncodeText(trace.Reference.Name)}",
+                $"PersistentId={trace.Reference.PersistentId}",
+                $"ObjectId={trace.Reference.ObjectId}",
+                $"CreationTimestamp={trace.Reference.CreationTimestamp:O}",
+                $"State={trace.State}",
+                $"Enabled={trace.Enabled}",
+                $"AllocatedBufferSize={trace.AllocatedBufferSize}",
+                $"ClassId={trace.ClassId}",
+                $"ClassFlags={trace.ClassFlags}",
+                $"AttributeId={trace.AttributeId}",
+                $"RequestBase64={Convert.ToBase64String(trace.RawRequest)}",
+                $"TriggerBase64={Convert.ToBase64String(trace.RawTrigger)}",
+                $"InterpretationBase64={Convert.ToBase64String(trace.RawInterpretation)}",
+                $"ResultBase64={Convert.ToBase64String(trace.RawResult)}",
+                $"LargeBufferBase64={Convert.ToBase64String(trace.RawLargeBuffer)}",
+                $"ClientDataBase64={Convert.ToBase64String(trace.RawClientData)}"
+            };
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+            foreach (var line in lines)
+                writer.WriteLine(line);
+        }
+
+        private static string EncodeText(string value) =>
+            Convert.ToBase64String(Encoding.UTF8.GetBytes(value ?? string.Empty));
 
         [Fact]
         public async Task LegacySessionKeyLifetimeReadOnlyTest()

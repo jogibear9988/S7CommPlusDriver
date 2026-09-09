@@ -1,7 +1,9 @@
 using S7CommPlusDriver.Internal;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace S7CommPlusDriver
 {
@@ -21,6 +23,7 @@ namespace S7CommPlusDriver
             public uint SubscriptionObjectId { get; set; }
             public uint SubscriptionRefObjectId { get; set; }
             public uint PollSequenceNumber { get; set; }
+            public byte[] LastPolledDataHash { get; set; }
         }
 
         public S7CommPlusTisTraceSubscriptionService(IS7CommPlusProtocolSession session)
@@ -31,8 +34,220 @@ namespace S7CommPlusDriver
 
         public string LastDiagnostic { get; private set; } = "";
 
-        public int Create(S7CommPlusTisTraceRequest request, out uint subscriptionObjectId)
+        public int GetInstalledTraces(bool includeResultData, out List<S7CommPlusInstalledTrace> traces)
         {
+            traces = new List<S7CommPlusInstalledTrace>();
+            var attributes = new List<uint>
+            {
+                Ids.ObjectVariableTypeName,
+                Ids.AbstractTisJob_TisJobEnabledConf,
+                Ids.AbstractTisJob_TisJobEnabledActual,
+                Ids.AbstractTisJob_ContinuingJob,
+                Ids.AbstractTisJob_CreationTimestamp,
+                Ids.AbstractTisJob_ModifyingJob,
+                Ids.AbstractTisJob_LargeBufferMemorySize,
+                Ids.AbstractTisJob_Request,
+                Ids.AbstractTisJob_Trigger,
+                Ids.TisTraceJob_ClientData,
+                Ids.TisTraceJob_Interpretation
+            };
+            if (includeResultData)
+            {
+                attributes.Add(Ids.AbstractTisJob_Result);
+                attributes.Add(Ids.TisTraceJob_LargeBuffer);
+            }
+            var result = _requests.Explore(Ids.NativeObjects_theTisSubsystem_Rid, attributes.ToArray(), out var response);
+            if (result != 0)
+                return result;
+            if (response?.ReturnValue != 0)
+                return S7Consts.errCliFunctionRefused;
+
+            var objects = Flatten(response.Objects).ToList();
+            var traceObjects = objects.Where(IsTraceJob).ToList();
+            LastDiagnostic = $"explored TIS subsystem {Ids.NativeObjects_theTisSubsystem_Rid}: " +
+                $"{objects.Count} objects, {traceObjects.Count} trace jobs";
+            foreach (var obj in traceObjects)
+                traces.Add(ConvertInstalledTrace(obj, includeResultData));
+            return 0;
+        }
+
+        public int GetStoredMeasurements(
+            bool includeResultData,
+            out List<S7CommPlusStoredTraceMeasurement> measurements)
+        {
+            measurements = new List<S7CommPlusStoredTraceMeasurement>();
+            var attributes = new List<uint>
+            {
+                Ids.ObjectVariableTypeName,
+                Ids.TisMeasurement_ActivationTime,
+                Ids.TisMeasurement_SavingTime,
+                Ids.TisMeasurement_SequenceNumber,
+                Ids.TisMeasurement_LargeBufferMemorySize,
+                Ids.TisMeasurement_Request,
+                Ids.TisMeasurement_Trigger,
+                Ids.TisMeasurement_Interpretation
+            };
+            if (includeResultData)
+            {
+                attributes.Add(Ids.TisMeasurement_Result);
+                attributes.Add(Ids.TisMeasurement_LargeBuffer);
+            }
+
+            var result = _requests.Explore(
+                Ids.NativeObjects_theMeasurementContainer_Rid,
+                attributes,
+                out var response,
+                exploreChildsRecursive: 1);
+            if (result != 0)
+                return result;
+            if (response?.ReturnValue != 0)
+                return S7Consts.errCliFunctionRefused;
+
+            var objects = Flatten(response.Objects).ToList();
+            var stored = objects.Where(obj => obj.ClassId == Ids.TisMeasurement_Class_Rid).ToList();
+            LastDiagnostic = $"explored measurement container {Ids.NativeObjects_theMeasurementContainer_Rid}: " +
+                $"{objects.Count} objects, {stored.Count} stored trace measurements";
+            foreach (var obj in stored)
+                measurements.Add(ConvertStoredMeasurement(obj));
+            return 0;
+        }
+
+        internal static bool IsTraceJob(PObject obj)
+        {
+            if (obj == null)
+                return false;
+            if (obj.ClassId == Ids.TisTraceJob_Class_Rid || obj.ClassId == Ids.TisContinuingJob_Class_Rid)
+                return true;
+
+            // Concrete TIS trace class IDs can vary with the CPU firmware's type schema. The inherited payload shape is
+            // stable and distinguishes traces from watch jobs, which have Request and Trigger but no Interpretation.
+            return obj.Attributes.ContainsKey(Ids.AbstractTisJob_Request)
+                && obj.Attributes.ContainsKey(Ids.AbstractTisJob_Trigger)
+                && obj.Attributes.ContainsKey(Ids.TisTraceJob_Interpretation);
+        }
+
+        private static IEnumerable<PObject> Flatten(IEnumerable<PObject> objects)
+        {
+            if (objects == null)
+                yield break;
+            foreach (var obj in objects)
+            {
+                yield return obj;
+                foreach (var child in Flatten(obj.GetObjects()))
+                    yield return child;
+            }
+        }
+
+        internal static S7CommPlusInstalledTrace ConvertInstalledTrace(PObject obj, bool resultDataIncluded)
+        {
+            var name = GetString(obj, Ids.ObjectVariableTypeName);
+            if (String.IsNullOrWhiteSpace(name))
+                name = $"Trace_{obj.RelationId:X8}";
+            var createdAt = GetTimestamp(obj, Ids.AbstractTisJob_CreationTimestamp);
+            var request = GetBlob(obj, Ids.AbstractTisJob_Request);
+            var trigger = GetBlob(obj, Ids.AbstractTisJob_Trigger);
+            var interpretation = GetBlob(obj, Ids.TisTraceJob_Interpretation);
+            var clientData = GetBlob(obj, Ids.TisTraceJob_ClientData);
+            var enabled = GetBool(obj, Ids.AbstractTisJob_TisJobEnabledActual)
+                ?? GetBool(obj, Ids.AbstractTisJob_TisJobEnabledConf);
+            var result = GetBlob(obj, Ids.AbstractTisJob_Result);
+            var largeBuffer = GetBlob(obj, Ids.TisTraceJob_LargeBuffer);
+            var allocatedBufferSize = GetUInt32(obj, Ids.AbstractTisJob_LargeBufferMemorySize);
+            var continuingJob = GetBool(obj, Ids.AbstractTisJob_ContinuingJob);
+            var state = !resultDataIncluded
+                ? enabled == false
+                    ? S7CommPlusTraceState.Inactive
+                    : S7CommPlusTraceState.Unknown
+                : S7CommPlusTisTraceResultStatus.IsCompleted(result)
+                    ? S7CommPlusTraceState.Completed
+                    : enabled == false
+                        ? S7CommPlusTraceState.Inactive
+                        : enabled == true
+                            ? S7CommPlusTraceState.WaitingForTrigger
+                            : S7CommPlusTraceState.Unknown;
+
+            var persistentId = CreateExternalPersistentId(name, createdAt, request, trigger, interpretation, clientData);
+            var reference = new S7CommPlusTraceReference(persistentId, name, obj.RelationId, createdAt);
+            return new S7CommPlusInstalledTrace(
+                reference,
+                state,
+                request,
+                trigger,
+                interpretation,
+                result,
+                largeBuffer,
+                clientData,
+                enabled,
+                resultDataIncluded,
+                allocatedBufferSize,
+                obj.ClassId,
+                obj.ClassFlags,
+                obj.AttributeId,
+                continuingJob);
+        }
+
+        internal static S7CommPlusStoredTraceMeasurement ConvertStoredMeasurement(PObject obj)
+        {
+            if (obj == null)
+                throw new ArgumentNullException(nameof(obj));
+            return new S7CommPlusStoredTraceMeasurement(
+                obj.RelationId,
+                GetString(obj, Ids.ObjectVariableTypeName),
+                GetTimestamp(obj, Ids.TisMeasurement_ActivationTime),
+                GetTimestamp(obj, Ids.TisMeasurement_SavingTime),
+                GetUInt32(obj, Ids.TisMeasurement_SequenceNumber),
+                GetUInt32(obj, Ids.TisMeasurement_LargeBufferMemorySize),
+                GetBlob(obj, Ids.TisMeasurement_Request),
+                GetBlob(obj, Ids.TisMeasurement_Trigger),
+                GetBlob(obj, Ids.TisMeasurement_Interpretation),
+                GetBlob(obj, Ids.TisMeasurement_Result),
+                GetBlob(obj, Ids.TisMeasurement_LargeBuffer));
+        }
+
+        private static string GetString(PObject obj, uint attribute) =>
+            obj.Attributes.TryGetValue(attribute, out var value) && value is ValueWString text ? text.GetValue() : null;
+
+        private static bool? GetBool(PObject obj, uint attribute) =>
+            obj.Attributes.TryGetValue(attribute, out var value) && value is ValueBool boolean ? boolean.GetValue() : (bool?)null;
+
+        private static uint? GetUInt32(PObject obj, uint attribute) =>
+            obj.Attributes.TryGetValue(attribute, out var value) && value is ValueUDInt unsigned ? unsigned.GetValue() : (uint?)null;
+
+        private static byte[] GetBlob(PObject obj, uint attribute) =>
+            obj.Attributes.TryGetValue(attribute, out var value)
+                ? ExtractBlob(value)
+                : Array.Empty<byte>();
+
+        private static DateTime? GetTimestamp(PObject obj, uint attribute)
+        {
+            if (!obj.Attributes.TryGetValue(attribute, out var value) || !(value is ValueTimestamp timestamp))
+                return null;
+            try
+            {
+                return RuntimeCompatibility.UnixEpoch.AddTicks(checked((long)(timestamp.GetValue() / 100UL))).UtcDateTime;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string CreateExternalPersistentId(string name, DateTime? createdAt, params byte[][] blobs)
+        {
+            var bytes = new List<byte>(Encoding.UTF8.GetBytes(name));
+            bytes.AddRange(BitConverter.GetBytes(createdAt?.Ticks ?? 0));
+            foreach (var blob in blobs)
+            {
+                bytes.AddRange(BitConverter.GetBytes(blob?.Length ?? 0));
+                if (blob != null)
+                    bytes.AddRange(blob);
+            }
+            return "external:" + RuntimeCompatibility.ToHexString(RuntimeCompatibility.Sha256(bytes.ToArray()));
+        }
+
+        public int Create(S7CommPlusTisTraceRequest request, out uint jobObjectId, out uint subscriptionObjectId)
+        {
+            jobObjectId = 0;
             subscriptionObjectId = 0;
             if (request == null)
                 return S7Consts.errCliInvalidParams;
@@ -42,23 +257,26 @@ namespace S7CommPlusDriver
             var state = new TraceState();
             var job = new PObject
             {
-                ClassId = (uint)(request.UseContinuingJob ? Ids.TisContinuingJob_Class_Rid : Ids.TisTraceJob_Class_Rid),
-                RelationId = Ids.GetNewRIDOnServer
+                // TisTraceJob is the concrete trace class. Its normal default is to continue independently of the
+                // creating connection, so only the opt-out needs to be sent explicitly.
+                ClassId = Ids.TisTraceJob_Class_Rid,
+                RelationId = Ids.GetNewRIDOnServer,
+                ClassFlags = 0x20
             };
             job.AddAttribute(Ids.ObjectVariableTypeName, new ValueWString(request.JobName));
-            if (!request.UseContinuingJob)
-                job.AddAttribute(Ids.TisTraceJob_Interpretation, new ValueBlob(0, request.InterpretationBlob));
-            job.AddAttribute(Ids.AbstractTisJob_LargeBufferMemorySize, new ValueUDInt(request.LargeBufferSizeUsed));
-            if (request.ClientData != null)
-                job.AddAttribute(Ids.TisTraceJob_ClientData, new ValueBlob(0, request.ClientData));
             job.AddAttribute(Ids.AbstractTisJob_Request, new ValueBlob(0, request.RequestBlob));
             job.AddAttribute(Ids.AbstractTisJob_Trigger, new ValueBlob(0, request.TriggerBlob));
-            job.AddAttribute(Ids.AbstractTisJob_ModifyingJob, new ValueBool(true));
+            job.AddAttribute(Ids.AbstractTisJob_LargeBufferMemorySize, new ValueUDInt(request.LargeBufferSizeUsed));
+            job.AddAttribute(Ids.TisTraceJob_Interpretation, new ValueBlob(0, request.InterpretationBlob));
+            if (request.ClientData != null)
+                job.AddAttribute(Ids.TisTraceJob_ClientData, new ValueBlob(0, request.ClientData));
+            if (!request.UseContinuingJob)
+                job.AddAttribute(Ids.AbstractTisJob_ContinuingJob, new ValueBool(false));
 
             var createJob = new CreateObjectRequest(ProtocolVersion.V2, 0, true)
             {
-                TransportFlags = S7CommPlusProtocolConstants.RequestWithResponseTransportFlags,
-                RequestId = request.UseContinuingJob ? 7u : _session.SessionId,
+                TransportFlags = S7CommPlusProtocolConstants.CreateObjectTransportFlags,
+                RequestId = Ids.NativeObjects_theTisSubsystem_Rid,
                 RequestValue = new ValueUDInt(0)
             };
             createJob.SetRequestObject(job);
@@ -75,7 +293,12 @@ namespace S7CommPlusDriver
                 if (response.ObjectIds.Count > 0)
                 {
                     state.JobObjectId = response.ObjectIds[0];
-                    Cleanup(state);
+                    var cleanupResult = Cleanup(state);
+                    if (cleanupResult != 0)
+                    {
+                        LastDiagnostic += $"; cleanup failed with {cleanupResult}; the partial PLC trace job may remain installed";
+                        request.LastLifecycleStage = LastDiagnostic;
+                    }
                 }
                 return S7Consts.errCliInvalidParams;
             }
@@ -84,29 +307,80 @@ namespace S7CommPlusDriver
             request.LastLifecycleStage = "create TIS trace subscription";
             result = CreateSubscription(request.JobName, state);
             if (result != 0)
-            {
-                Cleanup(state);
-                return result;
-            }
+                return FailCreation(request, state, result);
 
-            request.LastLifecycleStage = "enable TIS trace job and add notification credit";
-            result = _requests.SetMultiVariablesRaw(
-                0,
-                new uint[]
-                {
-                    0, state.JobObjectId, 1, Ids.AbstractTisJob_TisJobEnabledConf,
-                    0, state.SubscriptionRefObjectId, 1, Ids.TisSubscriptionRef_IncrementNotificationCredit
-                },
-                new PValue[] { new ValueBool(true), new ValueUSInt(1) });
+            request.LastLifecycleStage = "add TIS trace notification credit";
+            result = _requests.SetVariableAcknowledged(
+                state.SubscriptionRefObjectId,
+                Ids.TisSubscriptionRef_IncrementNotificationCredit,
+                new ValueUSInt(1));
             if (result != 0)
-            {
-                Cleanup(state);
-                return result;
-            }
+                return FailCreation(request, state, result);
+
+            request.LastLifecycleStage = "activate TIS trace job";
+            result = _requests.SetVariableAcknowledged(
+                state.JobObjectId,
+                Ids.AbstractTisJob_TisJobEnabledConf,
+                new ValueBool(true));
+            if (result != 0)
+                return FailCreation(request, state, result);
 
             request.LastLifecycleStage = "started";
+            jobObjectId = state.JobObjectId;
             subscriptionObjectId = state.SubscriptionObjectId;
             _subscriptions[subscriptionObjectId] = state;
+            return 0;
+        }
+
+        private int FailCreation(S7CommPlusTisTraceRequest request, TraceState state, int failure)
+        {
+            var failedStage = request.LastLifecycleStage;
+            var jobObjectId = state.JobObjectId;
+            var cleanupResult = Cleanup(state);
+            LastDiagnostic = $"{failedStage} failed with {failure}";
+            if (cleanupResult != 0)
+            {
+                LastDiagnostic += $"; cleanup of partial trace job 0x{jobObjectId:X8} failed with {cleanupResult}; " +
+                    "the PLC object may remain installed";
+            }
+            else if (jobObjectId != 0)
+            {
+                LastDiagnostic += $"; partial trace job 0x{jobObjectId:X8} was removed";
+            }
+            request.LastLifecycleStage = LastDiagnostic;
+            return failure;
+        }
+
+        public int Attach(uint jobObjectId, string jobName, out uint subscriptionObjectId)
+        {
+            subscriptionObjectId = 0;
+            if (jobObjectId == 0)
+                return S7Consts.errCliInvalidParams;
+
+            LastDiagnostic = "create TIS trace subscription for existing job";
+            var state = new TraceState { JobObjectId = jobObjectId };
+            var result = CreateSubscription(
+                String.IsNullOrWhiteSpace(jobName) ? $"Trace_{jobObjectId:X8}" : jobName,
+                state);
+            if (result != 0)
+            {
+                CleanupSubscription(state);
+                return result;
+            }
+
+            result = _requests.SetVariableAcknowledged(
+                state.SubscriptionRefObjectId,
+                Ids.TisSubscriptionRef_IncrementNotificationCredit,
+                new ValueUSInt(1));
+            if (result != 0)
+            {
+                CleanupSubscription(state);
+                return result;
+            }
+
+            subscriptionObjectId = state.SubscriptionObjectId;
+            _subscriptions[subscriptionObjectId] = state;
+            LastDiagnostic = "attached";
             return 0;
         }
 
@@ -144,7 +418,7 @@ namespace S7CommPlusDriver
 
             var create = new CreateObjectRequest(ProtocolVersion.V2, 0, true)
             {
-                TransportFlags = S7CommPlusProtocolConstants.RequestWithResponseTransportFlags,
+                TransportFlags = S7CommPlusProtocolConstants.CreateObjectTransportFlags,
                 RequestId = _session.SessionId2,
                 RequestValue = new ValueUDInt(0)
             };
@@ -155,10 +429,10 @@ namespace S7CommPlusDriver
                 _session.DisconnectTransport();
                 return result;
             }
-            if (response.ReturnValue != 0 || response.ObjectIds.Count == 0)
-                return S7Consts.errCliInvalidParams;
-            state.SubscriptionObjectId = response.ObjectIds[0];
+            state.SubscriptionObjectId = response.ObjectIds.Count > 0 ? response.ObjectIds[0] : 0;
             state.SubscriptionRefObjectId = response.ObjectIds.Count > 1 ? response.ObjectIds[1] : 0;
+            if (response.ReturnValue != 0 || state.SubscriptionObjectId == 0)
+                return S7Consts.errCliInvalidParams;
             return state.SubscriptionRefObjectId == 0 ? S7Consts.errCliInvalidParams : 0;
         }
 
@@ -186,8 +460,10 @@ namespace S7CommPlusDriver
                 if (TryPoll(state, out var polled))
                 {
                     notifications.Add(polled);
-                    _requests.SetVariable(state.SubscriptionRefObjectId, Ids.TisSubscriptionRef_IncrementNotificationCredit, new ValueUSInt(1));
-                    return 0;
+                    return _requests.SetVariableAcknowledged(
+                        state.SubscriptionRefObjectId,
+                        Ids.TisSubscriptionRef_IncrementNotificationCredit,
+                        new ValueUSInt(1));
                 }
                 LastDiagnostic = $"WaitNotification returned {result}";
                 return result;
@@ -206,7 +482,7 @@ namespace S7CommPlusDriver
                 ExtractByte(creditValue),
                 rawResult,
                 rawLargeBuffer));
-            return _requests.SetVariable(state.SubscriptionRefObjectId, Ids.TisSubscriptionRef_IncrementNotificationCredit, new ValueUSInt(1));
+            return _requests.SetVariableAcknowledged(state.SubscriptionRefObjectId, Ids.TisSubscriptionRef_IncrementNotificationCredit, new ValueUSInt(1));
         }
 
         private bool TryPoll(TraceState state, out S7CommPlusTisTraceNotification notification)
@@ -214,8 +490,17 @@ namespace S7CommPlusDriver
             notification = null;
             var rawResult = ReadBlob(state.JobObjectId, Ids.AbstractTisJob_Result);
             var rawLargeBuffer = ReadBlob(state.JobObjectId, Ids.TisTraceJob_LargeBuffer);
-            if (rawResult.Length == 0 && rawLargeBuffer.Length == 0)
+            if (!S7CommPlusTisTraceResultStatus.IsCompleted(rawResult))
                 return false;
+            var fingerprintSource = new byte[8 + rawResult.Length + rawLargeBuffer.Length];
+            Buffer.BlockCopy(BitConverter.GetBytes(rawResult.Length), 0, fingerprintSource, 0, 4);
+            Buffer.BlockCopy(rawResult, 0, fingerprintSource, 4, rawResult.Length);
+            Buffer.BlockCopy(BitConverter.GetBytes(rawLargeBuffer.Length), 0, fingerprintSource, 4 + rawResult.Length, 4);
+            Buffer.BlockCopy(rawLargeBuffer, 0, fingerprintSource, 8 + rawResult.Length, rawLargeBuffer.Length);
+            var fingerprint = RuntimeCompatibility.Sha256(fingerprintSource);
+            if (state.LastPolledDataHash != null && state.LastPolledDataHash.SequenceEqual(fingerprint))
+                return false;
+            state.LastPolledDataHash = fingerprint;
             notification = new S7CommPlusTisTraceNotification(
                 DateTime.UtcNow, ++state.PollSequenceNumber, 0, null, null, rawResult, rawLargeBuffer);
             return true;
@@ -239,19 +524,33 @@ namespace S7CommPlusDriver
             if (!_subscriptions.TryGetValue(subscriptionObjectId, out var state))
                 return 0;
             _subscriptions.Remove(subscriptionObjectId);
-            return Cleanup(state);
+            return CleanupSubscription(state);
+        }
+
+        public int DeleteJob(uint jobObjectId)
+        {
+            if (jobObjectId == 0)
+                return S7Consts.errCliInvalidParams;
+            return _session.DeleteObject(jobObjectId);
+        }
+
+        public int DeleteStoredMeasurement(uint measurementObjectId)
+        {
+            if (measurementObjectId == 0)
+                return S7Consts.errCliInvalidParams;
+            return _session.DeleteObject(measurementObjectId);
+        }
+
+        public int SetEnabled(uint jobObjectId, bool enabled)
+        {
+            if (jobObjectId == 0)
+                return S7Consts.errCliInvalidParams;
+            return _requests.SetVariableAcknowledged(jobObjectId, Ids.AbstractTisJob_TisJobEnabledConf, new ValueBool(enabled));
         }
 
         private int Cleanup(TraceState state)
         {
-            var result = 0;
-            if (state.SubscriptionObjectId != 0)
-            {
-                _requests.SetVariable(state.SubscriptionObjectId, Ids.SubscriptionDisabled, new ValueUSInt(1));
-                result = _session.DeleteObject(state.SubscriptionObjectId);
-                state.SubscriptionObjectId = 0;
-                state.SubscriptionRefObjectId = 0;
-            }
+            var result = CleanupSubscription(state);
             if (state.JobObjectId != 0)
             {
                 var deleteResult = _session.DeleteObject(state.JobObjectId);
@@ -262,21 +561,41 @@ namespace S7CommPlusDriver
             return result;
         }
 
+        private int CleanupSubscription(TraceState state)
+        {
+            var result = 0;
+            if (state.SubscriptionObjectId != 0)
+            {
+                result = _requests.SetVariableAcknowledged(
+                    state.SubscriptionObjectId,
+                    Ids.SubscriptionDisabled,
+                    new ValueUSInt(1));
+                var deleteResult = _session.DeleteObject(state.SubscriptionObjectId);
+                if (result == 0)
+                    result = deleteResult;
+                state.SubscriptionObjectId = 0;
+                state.SubscriptionRefObjectId = 0;
+            }
+            return result;
+        }
+
         private static bool? ExtractBool(PValue value) => value is ValueBool typed ? typed.GetValue() : null;
         private static byte? ExtractByte(PValue value) => value is ValueUSInt typed ? typed.GetValue() : null;
 
-        private static byte[] ExtractBlob(PValue value)
+        internal static byte[] ExtractBlob(PValue value)
         {
             if (value is ValueBlob blob)
                 return blob.GetValue() ?? Array.Empty<byte>();
             if (value is ValueBlobSparseArray sparse)
             {
+                using var combined = new MemoryStream();
                 foreach (var key in sparse.GetValue().Keys.OrderBy(x => x))
                 {
                     var data = sparse.GetValue()[key].value;
                     if (data != null && data.Length > 0)
-                        return data;
+                        combined.Write(data, 0, data.Length);
                 }
+                return combined.ToArray();
             }
             return Array.Empty<byte>();
         }

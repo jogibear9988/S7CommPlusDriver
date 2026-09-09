@@ -95,6 +95,39 @@ subscription.NotificationReceived += (_, e) =>
 
 Subscriptions share the client connection with normal request/response calls. The driver serializes foreground requests on that physical connection and routes notifications by PLC subscription object id, so reads and metadata requests can run while subscriptions are active without creating another PLC connection. Alarm subscriptions use `SubscribeAlarmsAsync(languageId)` and expose `NotificationReceived`, `CommunicationError`, `StateChanged`, and `Completion` in the same way. `SubscribeAlarmsAsync()` without a language id reads the CPU language catalog and explicitly requests its first three languages, avoiding PLCs that reject an empty all-language subscription filter. `GetActiveAlarmsAsync()` without a language id still requests every alarm text language returned by the PLC. The legacy `AlarmTexts` property contains the selected or first CPU language, and `AlarmTextsByLanguage` contains every language returned for that request. The library does not silently open a second PLC connection for alarm snapshots. If you need a live alarm subscription plus an initial active-alarm snapshot on a separate physical connection, create a second `S7CommPlusClient` yourself and pass it to the `SubscribeAlarmsWithSnapshotAsync(snapshotClient, ...)` overload.
 
+## Low-level PLC Trace Jobs
+
+The driver provides raw TIS trace creation, notification attachment, discovery, activation, deactivation, deletion, and
+memory-card measurement access. It does not compile trace definitions or decode configuration/result blobs; use
+`TiaFileFormat.S7CommPlus` for that high-level API.
+
+```csharp
+await using var subscription = await client.OpenTisTraceAsync(new S7CommPlusTisTraceRequest
+{
+    JobName = "Raw trace",
+    RequestBlob = requestBlob,
+    TriggerBlob = triggerBlob,
+    InterpretationBlob = interpretationBlob,
+    LargeBufferSizeUsed = bufferSize,
+    ClientData = optionalClientData,
+    UseContinuingJob = true
+});
+
+var traces = await client.GetInstalledTracesAsync();
+var selected = traces.Single(item => item.Reference.Name == "Raw trace");
+await using var attached = await client.AttachTisTraceAsync(selected.Reference);
+
+await client.DeactivateTraceAsync(selected.Reference);
+await client.ActivateTraceAsync(selected.Reference);
+var stored = await client.GetStoredTraceMeasurementsAsync(includeResultData: true);
+await client.DeleteTraceAsync(selected.Reference);
+```
+
+`OpenTisTraceAsync` installs and activates the PLC job. Disposing either subscription detaches locally but does not
+remove or deactivate the job. Trace mutation and deletion require `WriteEnabled = true`; discovery and attachment do
+not. Result buffers are opt-in through `S7CommPlusTraceQueryOptions.IncludeResultData`. Use notification
+`IsCompleted` to distinguish a finished recording from an allocated pretrigger buffer.
+
 ## PLC Text Lists for Alarms
 
 Alarm text payloads can contain TIA-style text-list placeholders such as `@2%t#519K@`. Load the PLC text-list catalog and pass it to the alarm APIs to resolve those placeholders, including nested system-diagnostic text-list references:

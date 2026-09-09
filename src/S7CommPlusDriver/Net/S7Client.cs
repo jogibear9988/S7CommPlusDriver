@@ -382,21 +382,32 @@ namespace S7CommPlusDriver
 
 		private int SendIsoPacket(byte[] Buffer)
 		{
-			// Packt die zu sendenden Daten in den Iso-Header ein.
-			int Size = Buffer.Length;
 			_LastError = 0;
+			if (Buffer == null)
+				return _LastError = S7Consts.errIsoInvalidPDU;
 
-			Array.Copy(TPKT_ISO, 0, PDU, 0, TPKT_ISO.Length);
-			SetWordAt(PDU, 2, (ushort)(Size + TPKT_ISO.Length));
-			try
+			int negotiatedTpduSize = _PDULength > 0
+				? _PDULength
+				: S7CommPlusProtocolConstants.DefaultIsoTpduSize;
+			int maxPayloadSize = negotiatedTpduSize - TPKT_ISO.Length;
+			if (maxPayloadSize <= 0)
+				return _LastError = S7Consts.errIsoInvalidPDU;
+
+			int offset = 0;
+			do
 			{
-				Array.Copy(Buffer, 0, PDU, TPKT_ISO.Length, Size);
+				int chunkSize = Math.Min(maxPayloadSize, Buffer.Length - offset);
+				byte[] packet = new byte[TPKT_ISO.Length + chunkSize];
+				Array.Copy(TPKT_ISO, 0, packet, 0, TPKT_ISO.Length);
+				SetWordAt(packet, 2, (ushort)packet.Length);
+				// The COTP EOT flag is set only on the final transport fragment.
+				packet[6] = offset + chunkSize >= Buffer.Length ? (byte)0x80 : (byte)0x00;
+				if (chunkSize > 0)
+					Array.Copy(Buffer, offset, packet, TPKT_ISO.Length, chunkSize);
+				SendPacket(packet);
+				offset += chunkSize;
 			}
-			catch
-			{
-				return S7Consts.errIsoInvalidPDU;
-			}
-			SendPacket(PDU, TPKT_ISO.Length + Size);
+			while (_LastError == 0 && offset < Buffer.Length);
 
 			return _LastError;
 		}

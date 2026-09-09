@@ -24,6 +24,12 @@ namespace S7CommPlusDriver.ClientApi
         public short Quality;
         public uint Datatype;
 
+        public bool HasTraceAddressMetadata { get; private set; }
+        public uint TraceOptimizedByteOffset { get; private set; }
+        public int TraceOptimizedBitOffset { get; private set; }
+        public uint TraceNonOptimizedByteOffset { get; private set; }
+        public int TraceNonOptimizedBitOffset { get; private set; }
+
         public ulong LastReadError;
         public ulong LastWriteError;
 
@@ -57,6 +63,17 @@ namespace S7CommPlusDriver.ClientApi
         }
 
         internal abstract PValue GetWriteValue();
+
+        internal void SetTraceAddressMetadata(VarInfo variable)
+        {
+            if (variable == null)
+                throw new ArgumentNullException(nameof(variable));
+            HasTraceAddressMetadata = true;
+            TraceOptimizedByteOffset = variable.OptAddress;
+            TraceOptimizedBitOffset = variable.OptBitoffset;
+            TraceNonOptimizedByteOffset = variable.NonOptAddress;
+            TraceNonOptimizedBitOffset = variable.NonOptBitoffset;
+        }
 
         protected static int CheckErrorAndType(ulong error, object valueObj, Type checkType)
         {

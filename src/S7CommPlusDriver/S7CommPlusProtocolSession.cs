@@ -544,9 +544,17 @@ namespace S7CommPlusDriver
             {
                 return S7Consts.errIsoInvalidPDU;
             }
-            if (useLegacyDigest && bytesToSend > MaxSize)
+            if (useLegacyDigest)
             {
-                return S7Consts.errS7CommPlusLegacyRequestTooLarge;
+                int buildError = BuildLegacyProtectedPdu(
+                    sendPduData,
+                    bytesToSend,
+                    protoVersion,
+                    out byte[] protectedPacket);
+                if (buildError != 0)
+                    return buildError;
+                m_client.Send(protectedPacket);
+                return m_client._LastError;
             }
             byte[] packet = new byte[MaxSize + S7CommPlusProtocolConstants.S7CommPlusHeaderLength + legacyDigestLength];
 
@@ -604,6 +612,40 @@ namespace S7CommPlusDriver
                 }
             }
             return m_LastError;
+        }
+
+        private int BuildLegacyProtectedPdu(
+            byte[] sendPduData,
+            int bytesToSend,
+            byte protoVersion,
+            out byte[] protectedPacket)
+        {
+            protectedPacket = null;
+            if (sendPduData == null || bytesToSend < 0 || bytesToSend > sendPduData.Length
+                || bytesToSend > UInt16.MaxValue - LegacyDigestFieldLength)
+            {
+                return S7Consts.errS7CommPlusLegacyRequestTooLarge;
+            }
+
+            int dataLength = bytesToSend + LegacyDigestFieldLength;
+            protectedPacket = new byte[
+                S7CommPlusProtocolConstants.S7CommPlusHeaderLength
+                + dataLength
+                + S7CommPlusProtocolConstants.S7CommPlusTrailerLength];
+            protectedPacket[0] = S7CommPlusProtocolConstants.FrameMarker;
+            protectedPacket[1] = protoVersion;
+            protectedPacket[2] = (byte)(dataLength >> 8);
+            protectedPacket[3] = (byte)dataLength;
+            if (!TryWriteLegacyDigest(protectedPacket, 4, sendPduData, 0, bytesToSend))
+            {
+                protectedPacket = null;
+                return S7Consts.errS7CommPlusDigestMismatch;
+            }
+            Array.Copy(sendPduData, 0, protectedPacket, 4 + LegacyDigestFieldLength, bytesToSend);
+            int trailerOffset = 4 + dataLength;
+            protectedPacket[trailerOffset] = S7CommPlusProtocolConstants.FrameMarker;
+            protectedPacket[trailerOffset + 1] = protoVersion;
+            return 0;
         }
 
         private int GetMaxS7CommPlusPayloadSize(int legacyDigestLength)
@@ -882,6 +924,12 @@ namespace S7CommPlusDriver
         internal int DebugSendLegacyPayloadForTests(byte[] payload)
         {
             return SendS7plusPDUdata(payload, payload.Length, ProtocolVersion.V3);
+        }
+
+        internal (int Error, byte[] Packet) DebugBuildLegacyProtectedPduForTests(byte[] payload)
+        {
+            int error = BuildLegacyProtectedPdu(payload, payload.Length, ProtocolVersion.V3, out byte[] packet);
+            return (error, packet);
         }
 
         private UInt16 GetWordAt(byte[] Buffer, int Pos)
@@ -1306,6 +1354,7 @@ namespace S7CommPlusDriver
         private int DeleteObject(uint deleteObjectId)
         {
             int res;
+            m_LastErrorDetail = string.Empty;
             var delObjReq = new DeleteObjectRequest(ProtocolVersion.V2);
             delObjReq.DeleteObjectId = deleteObjectId;
             res = SendS7plusFunctionObjectAndWait(delObjReq, m_ReadTimeout);
@@ -1335,6 +1384,11 @@ namespace S7CommPlusDriver
                 if (delObjRes.ReturnValue != 0)
                 {
                     Trace.WriteLine("S7CommPlusProtocolSession - DeleteSession: Executed with Error! ReturnValue=" + delObjRes.ReturnValue);
+                    m_LastErrorDetail = String.Format(
+                        "DeleteObject for object {0} was rejected with return value 0x{1:X16}.{2}",
+                        deleteObjectId,
+                        delObjRes.ReturnValue,
+                        delObjRes.ErrorObject == null ? String.Empty : " " + delObjRes.ErrorObject.ToString());
                     res = -1;
                 }
             }
@@ -1911,6 +1965,7 @@ namespace S7CommPlusDriver
             PVartypeListElement varType = pObj.VartypeList.Elements[idx];
             varInfo.AccessSequence += "." + String.Format("{0:X}", varType.LID);
             AddSymbolCrcSegment(varInfo, levelName, varType);
+            AccumulateTraceAddressMetadata(varInfo, varType);
             var isAggregateArray = IsAggregatePrimitiveArray(varType, symbol);
             if (varType.OffsetInfoType.Is1Dim())
             {
@@ -1948,6 +2003,32 @@ namespace S7CommPlusDriver
             }
         }
 
+        private static void AccumulateTraceAddressMetadata(VarInfo varInfo, PVartypeListElement varType)
+        {
+            if (varType?.OffsetInfoType == null)
+                return;
+
+            varInfo.OptAddress = checked(varInfo.OptAddress + varType.OffsetInfoType.OptimizedAddress);
+            varInfo.NonOptAddress = checked(varInfo.NonOptAddress + varType.OffsetInfoType.NonoptimizedAddress);
+
+            if (varType.Softdatatype == Softdatatype.S7COMMP_SOFTDATATYPE_BOOL)
+            {
+                varInfo.OptBitoffset = varType.GetAttributeBitoffset();
+                varInfo.NonOptBitoffset = varType.GetBitoffsetinfoFlagClassic()
+                    ? varType.GetBitoffsetinfoNonoptimizedBitoffset()
+                    : varType.GetAttributeBitoffset();
+            }
+            else if (varType.Softdatatype == Softdatatype.S7COMMP_SOFTDATATYPE_BBOOL)
+            {
+                varInfo.OptBitoffset = varType.GetBitoffsetinfoOptimizedBitoffset();
+            }
+            else
+            {
+                varInfo.OptBitoffset = 0;
+                varInfo.NonOptBitoffset = 0;
+            }
+        }
+
         /// <summary>
         /// Determines whether a complete primitive array was requested without an element index.
         /// Arrays of structures still require a member path and are rejected by the relation handling that follows.
@@ -1974,6 +2055,7 @@ namespace S7CommPlusDriver
         {
             var address = CreateItemAddress(varInfo);
             var tag = PlcTags.TagFactory(varInfo.Name, address, varType.Softdatatype, isAggregateArray);
+            tag?.SetTraceAddressMetadata(varInfo);
             if (!isAggregateArray || tag == null)
             {
                 return tag;
@@ -2012,6 +2094,7 @@ namespace S7CommPlusDriver
             var address = CreateItemAddress(varInfo);
             var isAggregateArray = varInfo.ArrayElementCount > 0;
             var tag = PlcTags.TagFactory(varInfo.Name, address, varInfo.Softdatatype, isAggregateArray);
+            tag?.SetTraceAddressMetadata(varInfo);
             if (!isAggregateArray || tag == null)
             {
                 return tag;

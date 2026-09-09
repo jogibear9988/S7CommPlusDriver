@@ -1943,6 +1943,282 @@ namespace S7CommPlusDriver.Tests
             Assert.False(result.Subscription.ReceivesAllAlarmTextLanguages);
         }
 
+        [Fact]
+        public async Task ExistingTraceCanBeOpenedReadOnlyAndDisposeOnlyDetaches()
+        {
+            uint attachedJob = 0;
+            string? attachedName = null;
+            var reference = new S7CommPlusTraceReference("external:test", "Existing trace", 0x1234);
+            var fake = new FakeS7CommPlusSession
+            {
+                InstalledTracesHandler = () => (0, new List<S7CommPlusInstalledTrace>
+                {
+                    CreateInstalledTraceSnapshot(reference)
+                }),
+                AttachTisTraceSubscriptionHandler = (job, name) =>
+                {
+                    attachedJob = job;
+                    attachedName = name;
+                    return 0;
+                },
+                WaitForTisTraceSubscriptionHandler = _ =>
+                    (S7Consts.errCliJobTimeout, new List<S7CommPlusTisTraceNotification>())
+            };
+            var client = CreateClient(fake, writeEnabled: false);
+
+            await using (var subscription = await client.AttachTisTraceAsync(reference, FastSubscriptionOptions()))
+            {
+                Assert.Equal(reference, subscription.TraceReference);
+            }
+
+            Assert.Equal((uint)0x1234, attachedJob);
+            Assert.Equal("Existing trace", attachedName);
+            Assert.Equal(1, fake.TisTraceSubscriptionCreateCount);
+            Assert.Equal(1, fake.TisTraceSubscriptionDeleteCount);
+            Assert.Equal(0, fake.TisTraceJobDeleteCount);
+        }
+
+        [Fact]
+        public async Task InstalledTraceQueryDownloadsResultBuffersOnlyWhenRequested()
+        {
+            var fake = new FakeS7CommPlusSession();
+            var client = CreateClient(fake);
+
+            await client.GetInstalledTracesAsync();
+            Assert.False(fake.LastTraceQueryIncludedResultData);
+
+            await client.GetInstalledTracesAsync(new S7CommPlusTraceQueryOptions
+            {
+                IncludeResultData = true
+            });
+            Assert.True(fake.LastTraceQueryIncludedResultData);
+        }
+
+        [Fact]
+        public async Task InstalledTraceCanBeRefreshedByPersistentIdentityAfterObjectIdChanges()
+        {
+            var oldReference = new S7CommPlusTraceReference("driver:stable", "Trace", 10);
+            var currentReference = new S7CommPlusTraceReference("driver:stable", "Trace", 99);
+            var current = new S7CommPlusInstalledTrace(
+                currentReference,
+                S7CommPlusTraceState.WaitingForTrigger,
+                null,
+                null,
+                null);
+            var fake = new FakeS7CommPlusSession
+            {
+                InstalledTracesHandler = () => (0, new List<S7CommPlusInstalledTrace> { current })
+            };
+            var client = CreateClient(fake);
+
+            var refreshed = await client.GetInstalledTraceAsync(oldReference);
+
+            Assert.Same(current, refreshed);
+            Assert.Equal((uint)99, refreshed.Reference.ObjectId);
+        }
+
+        [Fact]
+        public async Task ExistingTraceIsResolvedByPersistentIdentityBeforeAttachAndMutation()
+        {
+            var oldReference = new S7CommPlusTraceReference("driver:stable", "Trace", 10);
+            var currentReference = new S7CommPlusTraceReference("driver:stable", "Trace", 99);
+            var attachedObjectIds = new List<uint>();
+            var enabledWrites = new List<(uint ObjectId, bool Enabled)>();
+            var fake = new FakeS7CommPlusSession
+            {
+                InstalledTracesHandler = () => (0, new List<S7CommPlusInstalledTrace>
+                {
+                    CreateInstalledTraceSnapshot(currentReference)
+                }),
+                AttachTisTraceSubscriptionHandler = (objectId, _) =>
+                {
+                    attachedObjectIds.Add(objectId);
+                    return 0;
+                },
+                SetTisTraceJobEnabledHandler = (objectId, enabled) =>
+                {
+                    enabledWrites.Add((objectId, enabled));
+                    return 0;
+                },
+                WaitForTisTraceSubscriptionHandler = _ =>
+                    (S7Consts.errCliJobTimeout, new List<S7CommPlusTisTraceNotification>())
+            };
+            var client = CreateClient(fake, writeEnabled: true);
+
+            await using (var trace = await client.AttachTisTraceAsync(oldReference, FastSubscriptionOptions()))
+            {
+                Assert.Equal(currentReference, trace.TraceReference);
+            }
+            await client.ActivateTraceAsync(oldReference);
+            await client.DeactivateTraceAsync(oldReference);
+            await client.DeleteTraceAsync(oldReference);
+
+            Assert.Equal(new uint[] { 99 }, attachedObjectIds);
+            Assert.Equal(new[] { (99u, true), (99u, false) }, enabledWrites);
+            Assert.Equal(new uint[] { 99 }, fake.DeletedTisTraceJobIds);
+        }
+
+        [Fact]
+        public async Task TraceMutationDoesNotFallBackToReusedObjectId()
+        {
+            var staleReference = new S7CommPlusTraceReference("driver:missing", "Old trace", 10);
+            var unrelatedReference = new S7CommPlusTraceReference("driver:other", "Other trace", 10);
+            var fake = new FakeS7CommPlusSession
+            {
+                InstalledTracesHandler = () => (0, new List<S7CommPlusInstalledTrace>
+                {
+                    CreateInstalledTraceSnapshot(unrelatedReference)
+                })
+            };
+            var client = CreateClient(fake, writeEnabled: true);
+
+            var exception = await Assert.ThrowsAsync<S7CommPlusConnectionException>(() =>
+                client.DeleteTraceAsync(staleReference));
+
+            Assert.IsType<KeyNotFoundException>(exception.InnerException);
+            Assert.Empty(fake.DeletedTisTraceJobIds);
+        }
+
+        [Fact]
+        public async Task ConnectionLocalTraceReferenceMustStillExistBeforeAttachOrMutation()
+        {
+            var reference = new S7CommPlusTraceReference("tis-object:0000000A", "Raw trace", 10);
+            var fake = new FakeS7CommPlusSession
+            {
+                InstalledTracesHandler = () => (0, new List<S7CommPlusInstalledTrace>())
+            };
+            var client = CreateClient(fake, writeEnabled: true);
+
+            await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+                client.AttachTisTraceAsync(reference, FastSubscriptionOptions()));
+            var mutation = await Assert.ThrowsAsync<S7CommPlusConnectionException>(() =>
+                client.ActivateTraceAsync(reference));
+
+            Assert.IsType<KeyNotFoundException>(mutation.InnerException);
+            Assert.Equal(0, fake.TisTraceSubscriptionCreateCount);
+            Assert.Equal(0, fake.TisTraceJobEnabledWriteCount);
+        }
+
+        [Fact]
+        public async Task TraceMutationDoesNotFallBackToReusedName()
+        {
+            var staleReference = new S7CommPlusTraceReference("driver:deleted", "Reused trace", 10);
+            var replacementReference = new S7CommPlusTraceReference("driver:replacement", "Reused trace", 99);
+            var fake = new FakeS7CommPlusSession
+            {
+                InstalledTracesHandler = () => (0, new List<S7CommPlusInstalledTrace>
+                {
+                    CreateInstalledTraceSnapshot(replacementReference)
+                })
+            };
+            var client = CreateClient(fake, writeEnabled: true);
+
+            var refreshed = await client.GetInstalledTraceAsync(staleReference);
+            var exception = await Assert.ThrowsAsync<S7CommPlusConnectionException>(() =>
+                client.DeleteTraceAsync(staleReference));
+
+            Assert.Null(refreshed);
+            Assert.IsType<KeyNotFoundException>(exception.InnerException);
+            Assert.Empty(fake.DeletedTisTraceJobIds);
+        }
+        [Fact]
+        public async Task RawTisTraceDisposeDetachesWithoutDeletingJob()
+        {
+            var installedReference = new S7CommPlusTraceReference(
+                "tis-object:00000001",
+                "PersistentTrace",
+                1);
+            var fake = new FakeS7CommPlusSession
+            {
+                InstalledTracesHandler = () => (0, new List<S7CommPlusInstalledTrace>
+                {
+                    CreateInstalledTraceSnapshot(installedReference)
+                }),
+                WaitForTisTraceSubscriptionHandler = _ =>
+                {
+                    Thread.Sleep(5);
+                    return (S7Consts.errCliJobTimeout, new List<S7CommPlusTisTraceNotification>());
+                }
+            };
+            var client = CreateClient(fake, writeEnabled: true);
+
+            S7CommPlusTraceReference traceReference;
+            await using (var subscription = await client.OpenTisTraceAsync(
+                new S7CommPlusTisTraceRequest
+                {
+                    JobName = "PersistentTrace",
+                    RequestBlob = new byte[] { 1 },
+                    TriggerBlob = new byte[] { 2 },
+                    InterpretationBlob = new byte[] { 3 }
+                },
+                FastSubscriptionOptions()))
+            {
+                traceReference = subscription.TraceReference;
+            }
+
+            Assert.Equal(1, fake.TisTraceSubscriptionDeleteCount);
+            Assert.Equal(0, fake.TisTraceJobDeleteCount);
+
+            await client.DeleteTraceAsync(traceReference);
+
+            Assert.Equal(1, fake.TisTraceJobDeleteCount);
+            Assert.Contains(traceReference.ObjectId, fake.DeletedTisTraceJobIds);
+        }
+
+        [Fact]
+        public async Task RawTisTraceCreationSnapshotsCallerOwnedBuffersBeforeConnecting()
+        {
+            S7CommPlusTisTraceRequest? captured = null;
+            var fake = new FakeS7CommPlusSession
+            {
+                CreateTisTraceSubscriptionHandler = request =>
+                {
+                    captured = request;
+                    return 0;
+                },
+                WaitForTisTraceSubscriptionHandler = _ =>
+                    (S7Consts.errCliJobTimeout, new List<S7CommPlusTisTraceNotification>())
+            };
+            var client = CreateClient(fake, writeEnabled: true);
+            var request = new S7CommPlusTisTraceRequest
+            {
+                RequestBlob = new byte[] { 1 },
+                TriggerBlob = new byte[] { 2 },
+                InterpretationBlob = new byte[] { 3 },
+                ClientData = new byte[] { 4 }
+            };
+
+            var openTask = client.OpenTisTraceAsync(request, FastSubscriptionOptions());
+            request.RequestBlob[0] = 11;
+            request.TriggerBlob[0] = 12;
+            request.InterpretationBlob[0] = 13;
+            request.ClientData[0] = 14;
+            await using var subscription = await openTask;
+
+            Assert.NotNull(captured);
+            Assert.Equal(new byte[] { 1 }, captured!.RequestBlob);
+            Assert.Equal(new byte[] { 2 }, captured.TriggerBlob);
+            Assert.Equal(new byte[] { 3 }, captured.InterpretationBlob);
+            Assert.Equal(new byte[] { 4 }, captured.ClientData);
+        }
+
+        [Fact]
+        public async Task RawTisTraceCreationRequiresWriteEnabled()
+        {
+            var fake = new FakeS7CommPlusSession();
+            var client = CreateClient(fake, writeEnabled: false);
+
+            await Assert.ThrowsAsync<S7CommPlusWriteDisabledException>(() => client.OpenTisTraceAsync(
+                new S7CommPlusTisTraceRequest
+                {
+                    RequestBlob = new byte[] { 1 },
+                    TriggerBlob = new byte[] { 2 },
+                    InterpretationBlob = new byte[] { 3 }
+                }));
+
+            Assert.Equal(0, fake.TisTraceSubscriptionCreateCount);
+        }
+
         private static S7CommPlusClient CreateClient(
             FakeS7CommPlusSession fake,
             int requestTimeoutMs = 5000,
@@ -1961,7 +2237,15 @@ namespace S7CommPlusDriver.Tests
                 },
                 () => fake);
         }
-
+        private static S7CommPlusInstalledTrace CreateInstalledTraceSnapshot(S7CommPlusTraceReference reference)
+        {
+            return new S7CommPlusInstalledTrace(
+                reference,
+                S7CommPlusTraceState.Unknown,
+                null,
+                null,
+                null);
+        }
         /// <summary>
         /// Creates one synthetic aggregate UDINT tag with sequential element access IDs.
         /// </summary>
@@ -2050,6 +2334,16 @@ namespace S7CommPlusDriver.Tests
                 CycleTimeMilliseconds = 100,
                 NotificationTimeout = TimeSpan.FromMilliseconds(20)
             };
+        }
+
+        private static byte[] CreateCompletedTraceResult()
+        {
+            var result = new byte[19];
+            result[0] = 0x0c;
+            result[16] = 1;
+            result[17] = 1;
+            result[18] = 1;
+            return result;
         }
 
         private static S7CommPlusTisWatchRequest CreateTisWatchRequest(byte seed)

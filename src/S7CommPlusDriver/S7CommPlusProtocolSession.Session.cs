@@ -224,9 +224,26 @@ namespace S7CommPlusDriver
             return TisWatchSubscriptions.Delete(subscriptionObjectId);
         }
 
-        int IS7CommPlusSession.CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint subscriptionObjectId)
+        int IS7CommPlusSession.CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint jobObjectId, out uint subscriptionObjectId)
         {
-            return TisTraceSubscriptions.Create(request, out subscriptionObjectId);
+            return TisTraceSubscriptions.Create(request, out jobObjectId, out subscriptionObjectId);
+        }
+
+        int IS7CommPlusSession.AttachTisTraceSubscription(uint jobObjectId, string jobName, out uint subscriptionObjectId)
+        {
+            return TisTraceSubscriptions.Attach(jobObjectId, jobName, out subscriptionObjectId);
+        }
+
+        int IS7CommPlusSession.GetInstalledTraces(bool includeResultData, out List<S7CommPlusInstalledTrace> traces)
+        {
+            return TisTraceSubscriptions.GetInstalledTraces(includeResultData, out traces);
+        }
+
+        int IS7CommPlusSession.GetStoredTraceMeasurements(
+            bool includeResultData,
+            out List<S7CommPlusStoredTraceMeasurement> measurements)
+        {
+            return TisTraceSubscriptions.GetStoredMeasurements(includeResultData, out measurements);
         }
 
         int IS7CommPlusSession.WaitForTisTraceNotifications(uint subscriptionObjectId, int timeoutMilliseconds, out List<S7CommPlusTisTraceNotification> notifications)
@@ -239,6 +256,21 @@ namespace S7CommPlusDriver
         int IS7CommPlusSession.DeleteTisTraceSubscription(uint subscriptionObjectId)
         {
             return TisTraceSubscriptions.Delete(subscriptionObjectId);
+        }
+
+        int IS7CommPlusSession.SetTisTraceJobEnabled(uint jobObjectId, bool enabled)
+        {
+            return TisTraceSubscriptions.SetEnabled(jobObjectId, enabled);
+        }
+
+        int IS7CommPlusSession.DeleteTisTraceJob(uint jobObjectId)
+        {
+            return TisTraceSubscriptions.DeleteJob(jobObjectId);
+        }
+
+        int IS7CommPlusSession.DeleteStoredTraceMeasurement(uint measurementObjectId)
+        {
+            return TisTraceSubscriptions.DeleteStoredMeasurement(measurementObjectId);
         }
 
         private sealed class ProtocolSessionAdapter : IS7CommPlusProtocolSession

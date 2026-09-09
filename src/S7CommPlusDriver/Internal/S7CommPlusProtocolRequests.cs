@@ -174,6 +174,44 @@ namespace S7CommPlusDriver.Internal
             return _session.SendFunction(request);
         }
 
+        public int SetVariableAcknowledged(uint objectId, uint address, PValue value)
+        {
+            if (objectId == 0 || value == null)
+            {
+                return S7Consts.errCliInvalidParams;
+            }
+
+            var request = new SetVariableRequest(ProtocolVersion.V2)
+            {
+                TransportFlags = S7CommPlusProtocolConstants.RequestWithResponseTransportFlags,
+                InObjectId = objectId,
+                Address = address,
+                Value = value
+            };
+
+            var result = SendAndReceive(request);
+            if (result != 0)
+            {
+                return result;
+            }
+
+            var response = SetVariableResponse.DeserializeFromPdu(_session.ReceivedPdu);
+            if (response == null)
+            {
+                return S7Consts.errIsoInvalidPDU;
+            }
+
+            result = _session.CheckResponse(request, response);
+            if (result != 0)
+            {
+                return result;
+            }
+
+            return response.ReturnValue == 0
+                ? 0
+                : S7Consts.errCliFunctionRefused;
+        }
+
         public int SetMultiVariablesRaw(uint inObjectId, IEnumerable<uint> addressFields, IEnumerable<PValue> values)
         {
             if (addressFields == null || values == null)
@@ -200,7 +238,19 @@ namespace S7CommPlusDriver.Internal
             }
 
             var response = SetMultiVariablesResponse.DeserializeFromPdu(_session.ReceivedPdu);
-            return response == null ? S7Consts.errIsoInvalidPDU : _session.CheckResponse(request, response);
+            if (response == null)
+                return S7Consts.errIsoInvalidPDU;
+            var resultError = _session.CheckResponse(request, response);
+            if (resultError != 0)
+                return resultError;
+            if (response.ReturnValue != 0)
+                return S7Consts.errCliFunctionRefused;
+            foreach (var item in response.ErrorValues)
+            {
+                if (item.Value != 0)
+                    return S7Consts.errCliFunctionRefused;
+            }
+            return 0;
         }
 
         private int SendAndReceive(IS7pRequest request)

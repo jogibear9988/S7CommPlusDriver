@@ -22,6 +22,7 @@ namespace S7CommPlusDriver
         public const int NativeObjects_theHardwareConfiguration_Rid = 2;
         public const int NativeObjects_thePLCProgram_Rid = 3;
         public const int PlcProgram = NativeObjects_thePLCProgram_Rid;
+        public const int NativeObjects_theTisSubsystem_Rid = 7;
         public const int NativeObjects_theAlarmSubsystem_Rid = 8;
         public const int AlarmSubSystem = NativeObjects_theAlarmSubsystem_Rid;
         public const int NativeObjects_theCPU_Rid = 48;
@@ -29,6 +30,7 @@ namespace S7CommPlusDriver
         public const int NativeObjects_theCPUCommon_Rid = 50;
         public const int NativeObjects_theCPUexecUnit_Rid = 52;
         public const int NativeObjects_theTextContainer_Rid = 114;
+        public const int NativeObjects_theMeasurementContainer_Rid = 116;
         public const int NativeObjects_theIArea_Rid = 80;
         public const int NativeObjects_theQArea_Rid = 81;
         public const int NativeObjects_theMArea_Rid = 82;
@@ -76,6 +78,7 @@ namespace S7CommPlusDriver
         public const int TextLibraryOffsetArea = 608;
         public const int TextLibraryStringArea = 609;
         public const int TextContainer_Class_Rid = 4672;
+        public const int MeasurementContainer_Class_Rid = 4718;
         public const int TextContainer_LCIDs_Aid = 2717;
         public const int ClassSubscription = 1001;
         public const int SubscriptionMissedSendings = 1002;
@@ -271,6 +274,20 @@ namespace S7CommPlusDriver
         public const int TisTraceJob_Class_Rid = 8138;
         public const int TisTraceJob_Interpretation = 8140;
         public const int TisTraceJob_LargeBuffer = 8142;
+        public const int TisMeasurement_Class_Rid = 8143;
+        public const int TisMeasurementContainer_itsMeasurement = 8144;
+        public const int TisMeasurement_ActivationTime = 8145;
+        public const int TisMeasurement_Host = 8146;
+        public const int TisMeasurement_Interpretation = 8147;
+        public const int TisMeasurement_LargeBuffer = 8148;
+        public const int TisMeasurement_LargeBufferMemorySize = 8149;
+        public const int TisMeasurement_SequenceNumber = 8150;
+        public const int TisMeasurement_Request = 8151;
+        public const int TisMeasurement_Result = 8152;
+        public const int TisMeasurement_SavingTime = 8153;
+        public const int TisMeasurement_Trigger = 8154;
+        public const int TisMeasurement_TriggerAndAddresses = 8155;
+        public const int TisMeasurement_User = 8156;
         public const int AlarmSubscriptionRef_AlarmDomain2 = 7731;
         public const int AlarmSubscr_AlarmDomain2 = AlarmSubscriptionRef_AlarmDomain2;
         public const int DAI_HmiInfo = 7813;

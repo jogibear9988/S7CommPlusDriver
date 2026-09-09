@@ -51,9 +51,15 @@ namespace S7CommPlusDriver
         string LastTisWatchDiagnostic { get; }
         string LastAlarmSubscriptionDiagnostic { get; }
         int DeleteTisWatchSubscription(uint subscriptionObjectId);
-        int CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint subscriptionObjectId);
+        int CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint jobObjectId, out uint subscriptionObjectId);
+        int AttachTisTraceSubscription(uint jobObjectId, string jobName, out uint subscriptionObjectId);
+        int GetInstalledTraces(bool includeResultData, out List<S7CommPlusInstalledTrace> traces);
+        int GetStoredTraceMeasurements(bool includeResultData, out List<S7CommPlusStoredTraceMeasurement> measurements);
         int WaitForTisTraceNotifications(uint subscriptionObjectId, int timeoutMilliseconds, out List<S7CommPlusTisTraceNotification> notifications);
         string LastTisTraceDiagnostic { get; }
         int DeleteTisTraceSubscription(uint subscriptionObjectId);
+        int SetTisTraceJobEnabled(uint jobObjectId, bool enabled);
+        int DeleteTisTraceJob(uint jobObjectId);
+        int DeleteStoredTraceMeasurement(uint measurementObjectId);
     }
 }

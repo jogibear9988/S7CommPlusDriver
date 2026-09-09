@@ -495,6 +495,71 @@ Idle notification waits are not treated as failures by default. Set
 typed communication failure after a fixed number of empty waits. Write
 protection is unchanged: subscriptions do not enable PLC signal writes.
 
+## Low-level PLC Trace Jobs
+
+This package exposes the raw TIS trace transport and lifecycle API. It deliberately does not define trigger models,
+symbol compilation, configuration decoding, or typed measurement decoding. Those high-level features live in
+`TiaFileFormat.S7CommPlus`.
+
+A raw request consists of the three protocol blobs plus the requested result-buffer size. Creating it installs and
+activates the PLC job before returning. By default, the job continues independently when this connection closes.
+Disposing the returned subscription removes only the temporary notification attachment; it never deletes the PLC job.
+
+```csharp
+var request = new S7CommPlusTisTraceRequest
+{
+    JobName = "Raw trace",
+    RequestBlob = requestBlob,
+    TriggerBlob = triggerBlob,
+    InterpretationBlob = interpretationBlob,
+    LargeBufferSizeUsed = bufferSize,
+    ClientData = optionalClientData,
+    UseContinuingJob = true
+};
+
+await using var subscription = await client.OpenTisTraceAsync(request);
+var reference = subscription.TraceReference;
+var completion = new TaskCompletionSource<S7CommPlusTisTraceNotification>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
+subscription.NotificationReceived += (_, e) =>
+{
+    if (e.Notification.IsCompleted)
+        completion.TrySetResult(e.Notification);
+};
+if (subscription.LatestResult is { } latest)
+    completion.TrySetResult(latest);
+using var cancellation = cancellationToken.Register(() => completion.TrySetCanceled());
+var completed = await completion.Task;
+```
+
+Inventory and lifecycle operations remain low-level and preserve all uninterpreted bytes:
+
+```csharp
+var installed = await client.GetInstalledTracesAsync();
+var selected = installed.Single(item => item.Reference.Name == "Raw trace");
+
+// Result and large-buffer attributes are opt-in because they may be large.
+var withData = await client.GetInstalledTraceAsync(
+    selected.Reference,
+    new S7CommPlusTraceQueryOptions { IncludeResultData = true });
+
+await using var attached = await client.AttachTisTraceAsync(selected.Reference);
+await client.DeactivateTraceAsync(selected.Reference);
+await client.ActivateTraceAsync(selected.Reference); // re-arm
+
+var stored = await client.GetStoredTraceMeasurementsAsync(includeResultData: true);
+if (stored.Count != 0)
+    await client.DeleteStoredTraceMeasurementAsync(stored[0].ObjectId);
+
+await client.DeleteTraceAsync(selected.Reference);
+```
+
+Creation, activation, deactivation, job deletion, and stored-measurement deletion require `WriteEnabled = true`.
+Discovery and attachment are read-only. With `AutoReconnect`, an active raw attachment rediscovers its PLC-owned job
+and recreates the notification subscription after a transient connection failure. A waiting trace may already expose a
+pretrigger ring buffer, so use `S7CommPlusTisTraceNotification.IsCompleted` rather than `HasResultData` to decide that
+the trigger fired and recording finished.
+
 ## Older PLCs / Legacy Challenge Auth
 
 On `net48`/`net8.0`/`net9.0`, `Auto` is the default: it tries TLS first and reconnects with
@@ -586,6 +651,31 @@ that supports those APIs, enable extended metadata:
 
 ```powershell
 $env:S7COMMPLUS_LIVE_EXTENDED_METADATA = "true"
+```
+
+To enumerate installed trace jobs without changing them, enable the trace check. Result buffers remain opt-in because
+they may be large. The test logs only trace identity and byte counts, never buffer contents:
+
+```powershell
+$env:S7COMMPLUS_LIVE_TRACES = "true"
+$env:S7COMMPLUS_LIVE_TRACE_RESULTS = "true" # optional
+```
+
+For raw trace payload diagnostics, an explicit fixture directory writes one unique text fixture per installed trace. This
+requires result downloads and never overwrites an existing file. Trace buffers can contain sampled process values, so
+use only a controlled local directory and review fixtures before sharing them:
+
+```powershell
+$env:S7COMMPLUS_LIVE_TRACE_FIXTURE_DIRECTORY = "C:\Temp\s7-trace-fixtures"
+```
+
+Activation and deactivation can be verified against one explicitly selected, initially inactive trace. This opt-in test
+does not create or delete jobs and restores the trace to its inactive state:
+
+```powershell
+$env:S7COMMPLUS_LIVE_TRACE_LIFECYCLE = "true"
+$env:S7COMMPLUS_LIVE_TRACE_NAME = "My inactive trace"
+dotnet test src\S7CommPlusDriver.Tests\S7CommPlusDriver.Tests.csproj --filter LiveTraceLifecycleTests
 ```
 
 To read explicit tags, provide semicolon-separated tag symbols:

@@ -772,7 +772,7 @@ namespace S7CommPlusDriver
                         break;
                     case ElementID.Attribute:
                         ret += DecodeUInt32Vlq(buffer, out id);
-                        obj.AddAttribute(id, PValue.Deserialize(buffer));
+                        obj.SetDecodedAttribute(id, PValue.Deserialize(buffer));
                         break;
                     case ElementID.StartOfTagDescription:
                         // Skip, only 1200 FW2 and maybe older, which definitively don't support TLS

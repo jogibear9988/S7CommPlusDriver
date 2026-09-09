@@ -255,14 +255,25 @@ namespace S7CommPlusDriver.Tests
         }
 
         [Fact]
-        public void OversizedLegacyPayloadIsRejectedBeforeFragmentation()
+        public void LargeLegacyPayloadIsProtectedOnceBeforeTransportFragmentation()
         {
             var connection = new S7CommPlusProtocolSession();
-            connection.DebugEnableLegacyDigestForTests(new byte[24]);
+            var sessionKey = Enumerable.Range(1, 24).Select(value => (byte)value).ToArray();
+            var payload = Enumerable.Range(0, 2000).Select(value => (byte)value).ToArray();
+            connection.DebugEnableLegacyDigestForTests(sessionKey);
 
-            var error = connection.DebugSendLegacyPayloadForTests(new byte[2000]);
+            var result = connection.DebugBuildLegacyProtectedPduForTests(payload);
 
-            Assert.Equal(S7Consts.errS7CommPlusLegacyRequestTooLarge, error);
+            Assert.Equal(0, result.Error);
+            Assert.Equal(4 + 33 + payload.Length + 4, result.Packet.Length);
+            Assert.Equal(0x72, result.Packet[0]);
+            Assert.Equal(ProtocolVersion.V3, result.Packet[1]);
+            Assert.Equal(payload.Length + 33, (result.Packet[2] << 8) | result.Packet[3]);
+            Assert.Equal(32, result.Packet[4]);
+            Assert.Equal(payload, result.Packet.Skip(37).Take(payload.Length));
+            Assert.Equal(
+                new byte[] { 0x72, ProtocolVersion.V3, 0x00, 0x00 },
+                result.Packet.Skip(result.Packet.Length - 4).ToArray());
         }
 
         private static byte[] CreateLegacyFragment(byte[] body, byte[] digestInput, byte[] sessionKey, bool hasTrailer)

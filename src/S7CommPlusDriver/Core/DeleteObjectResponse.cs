@@ -23,6 +23,7 @@ namespace S7CommPlusDriver
         public byte TransportFlags;
         public UInt64 ReturnValue;
         public UInt32 DeleteObjectId;
+        public PObject ErrorObject;
 
         public byte ProtocolVersion { get; set; }
         public ushort FunctionCode { get => Functioncode.DeleteObject; }
@@ -49,8 +50,8 @@ namespace S7CommPlusDriver
             if ((ReturnValue & 0x4000000000000000) > 0) // Error Extension
             {
                 // Decode the error object, but don't use any informations from it. Must be processed on a higher level.
-                PObject errorObject = new PObject();
-                ret += S7p.DecodeObject(buffer, ref errorObject);
+                ErrorObject = new PObject();
+                ret += S7p.DecodeObject(buffer, ref ErrorObject);
             }
             if (WithIntegrityId)
             {
@@ -70,6 +71,8 @@ namespace S7CommPlusDriver
             s += "<ResponseSet>" + Environment.NewLine;
             s += "<ReturnValue>" + ReturnValue.ToString() + "</ReturnValue>" + Environment.NewLine;
             s += "<DeleteObjectId>" + DeleteObjectId.ToString() + "</DeleteObjectId>" + Environment.NewLine;
+            if (ErrorObject != null)
+                s += ErrorObject.ToString();
             s += "</ResponseSet>" + Environment.NewLine;
             s += "<WithIntegrityId>" + WithIntegrityId.ToString() + "</WithIntegrityId>" + Environment.NewLine;
             s += "<IntegrityId>" + IntegrityId.ToString() + "</IntegrityId>" + Environment.NewLine;

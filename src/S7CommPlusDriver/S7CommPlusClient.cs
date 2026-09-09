@@ -47,6 +47,11 @@ namespace S7CommPlusDriver
         public S7CommPlusClientOptions Options => _options.Clone();
 
         /// <summary>
+        /// Gets the most recent trace operation diagnostic produced by the active protocol session.
+        /// </summary>
+        public string LastTraceDiagnostic => _session?.LastTisTraceDiagnostic ?? String.Empty;
+
+        /// <summary>
         /// Executes one or more client requests with an operation-specific timeout instead of their configured defaults.
         /// </summary>
         /// <typeparam name="T">The result returned by the client request.</typeparam>
@@ -530,6 +535,80 @@ namespace S7CommPlusDriver
             }, cancellationToken);
         }
 
+        /// <summary>Lists all trace configurations currently installed on the PLC.</summary>
+        public Task<IReadOnlyList<S7CommPlusInstalledTrace>> GetInstalledTracesAsync(CancellationToken cancellationToken = default)
+        {
+            return GetInstalledTracesAsync(new S7CommPlusTraceQueryOptions(), cancellationToken);
+        }
+
+        public Task<IReadOnlyList<S7CommPlusInstalledTrace>> GetInstalledTracesAsync(
+            S7CommPlusTraceQueryOptions options,
+            CancellationToken cancellationToken = default)
+        {
+            if (options == null)
+                throw new ArgumentNullException(nameof(options));
+            return ExecuteReadOperationAsync<IReadOnlyList<S7CommPlusInstalledTrace>>("GetInstalledTraces", session =>
+            {
+                var error = session.GetInstalledTraces(options.IncludeResultData, out var traces);
+                ThrowIfError("GetInstalledTraces", error);
+                return traces;
+            }, cancellationToken);
+        }
+
+        /// <summary>
+        /// Finds one installed trace by persistent identity and returns its current PLC object reference and state.
+        /// Returns <see langword="null"/> when the trace is no longer installed.
+        /// </summary>
+        public Task<S7CommPlusInstalledTrace> GetInstalledTraceAsync(
+            S7CommPlusTraceReference trace,
+            S7CommPlusTraceQueryOptions options = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (trace == null)
+                throw new ArgumentNullException(nameof(trace));
+            var query = options ?? new S7CommPlusTraceQueryOptions();
+            return ExecuteReadOperationAsync("GetInstalledTrace", session =>
+            {
+                var error = session.GetInstalledTraces(query.IncludeResultData, out var traces);
+                ThrowIfError("GetInstalledTrace", error);
+                return ResolveInstalledTrace(trace, traces);
+            }, cancellationToken);
+        }
+
+        /// <summary>Lists raw memory-card trace measurements without interpreting their payloads.</summary>
+        public Task<IReadOnlyList<S7CommPlusStoredTraceMeasurement>> GetStoredTraceMeasurementsAsync(
+            bool includeResultData = false,
+            CancellationToken cancellationToken = default)
+        {
+            return ExecuteReadOperationAsync<IReadOnlyList<S7CommPlusStoredTraceMeasurement>>(
+                "GetStoredTraceMeasurements",
+                session =>
+                {
+                    var error = session.GetStoredTraceMeasurements(includeResultData, out var measurements);
+                    ThrowIfError("GetStoredTraceMeasurements", error);
+                    return measurements ?? new List<S7CommPlusStoredTraceMeasurement>();
+                },
+                cancellationToken);
+        }
+
+        /// <summary>Deletes one raw memory-card trace measurement by its current PLC object ID.</summary>
+        public async Task DeleteStoredTraceMeasurementAsync(
+            uint measurementObjectId,
+            CancellationToken cancellationToken = default)
+        {
+            if (measurementObjectId == 0)
+                throw new ArgumentOutOfRangeException(nameof(measurementObjectId));
+            await ExecuteWriteOperationAsync(
+                "DeleteStoredTraceMeasurement",
+                session =>
+                {
+                    var error = session.DeleteStoredTraceMeasurement(measurementObjectId);
+                    ThrowIfError("DeleteStoredTraceMeasurement", error);
+                    return true;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+
         public Task<S7CommPlusCpuState> GetCpuStateAsync(CancellationToken cancellationToken = default)
         {
             return ExecuteReadOperationAsync("GetCpuState", session =>
@@ -802,12 +881,14 @@ namespace S7CommPlusDriver
         {
             if (request == null)
                 throw new ArgumentNullException(nameof(request));
+            if (!_options.WriteEnabled)
+                throw new S7CommPlusWriteDisabledException(Endpoint);
 
-            request.Validate();
             var traceRequest = request.Clone();
+            traceRequest.Validate();
             var subscriptionOptions = (options ?? new S7CommPlusSubscriptionOptions()).Clone();
             subscriptionOptions.Validate(requireCycleTime: false);
-            var subscription = new S7CommPlusTisTraceSubscription();
+            S7CommPlusTisTraceSubscription subscription = null;
             var operationTimeout = _operationTimeout.Value ?? _options.RequestTimeout;
 
             await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -815,10 +896,11 @@ namespace S7CommPlusDriver
             {
                 ThrowIfDisposed();
                 await EnsureConnectedCoreAsync(cancellationToken).ConfigureAwait(false);
+                uint jobObjectId = 0;
                 uint subscriptionObjectId = 0;
                 var error = await RunOperationAttemptAsync(
                     "CreateTisTraceSubscription",
-                    session => session.CreateTisTraceSubscription(traceRequest, out subscriptionObjectId),
+                    session => session.CreateTisTraceSubscription(traceRequest, out jobObjectId, out subscriptionObjectId),
                     operationTimeout,
                     cancellationToken).ConfigureAwait(false);
                 var operation = String.IsNullOrWhiteSpace(traceRequest.LastLifecycleStage)
@@ -826,6 +908,10 @@ namespace S7CommPlusDriver
                     : $"CreateTisTraceSubscription ({traceRequest.LastLifecycleStage})";
                 ThrowIfError(operation, error);
 
+                subscription = new S7CommPlusTisTraceSubscription(new S7CommPlusTraceReference(
+                    $"tis-object:{jobObjectId:X8}",
+                    traceRequest.JobName,
+                    jobObjectId));
                 subscription.Start(token => RunTisTraceSubscriptionLoopAsync(subscription, subscriptionOptions, subscriptionObjectId, token));
                 return subscription;
             }
@@ -834,13 +920,136 @@ namespace S7CommPlusDriver
                 RaiseCommunicationError(ex);
                 if (ex.IsTransient)
                     SetState(S7CommPlusConnectionState.Faulted, ex);
-                subscription.MarkFaulted(ex);
+                subscription?.MarkFaulted(ex);
                 throw;
             }
             finally
             {
                 _operationGate.Release();
             }
+        }
+
+        /// <summary>
+        /// Attaches a raw local TIS notification subscription to an already installed PLC trace.
+        /// </summary>
+        /// <remarks>Disposing the subscription detaches only the local notification object and never deletes the trace job.</remarks>
+        public async Task<S7CommPlusTisTraceSubscription> AttachTisTraceAsync(
+            S7CommPlusTraceReference trace,
+            S7CommPlusSubscriptionOptions options = null,
+            CancellationToken cancellationToken = default)
+        {
+            ValidateTraceReference(trace);
+            var subscriptionOptions = (options ?? new S7CommPlusSubscriptionOptions()).Clone();
+            subscriptionOptions.Validate(requireCycleTime: false);
+            S7CommPlusTisTraceSubscription subscription = null;
+            var operationTimeout = _operationTimeout.Value ?? _options.RequestTimeout;
+
+            await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ThrowIfDisposed();
+                await EnsureConnectedCoreAsync(cancellationToken).ConfigureAwait(false);
+                List<S7CommPlusInstalledTrace> installed = null;
+                var discoveryError = await RunOperationAttemptAsync(
+                    "GetInstalledTraces",
+                    session => session.GetInstalledTraces(false, out installed),
+                    operationTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                ThrowIfError("AttachTisTrace", discoveryError);
+                var resolved = ResolveInstalledTrace(trace, installed);
+                if (resolved == null)
+                    throw new KeyNotFoundException($"Trace '{trace.Name}' is no longer installed on the PLC.");
+                var currentTrace = resolved.Reference;
+                uint subscriptionObjectId = 0;
+                var error = await RunOperationAttemptAsync(
+                    "AttachTisTraceSubscription",
+                    session => session.AttachTisTraceSubscription(
+                        currentTrace.ObjectId,
+                        currentTrace.Name,
+                        out subscriptionObjectId),
+                    operationTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                ThrowIfError("AttachTisTraceSubscription", error);
+
+                subscription = new S7CommPlusTisTraceSubscription(currentTrace);
+                subscription.Start(token => RunTisTraceSubscriptionLoopAsync(
+                    subscription,
+                    subscriptionOptions,
+                    subscriptionObjectId,
+                    token));
+                return subscription;
+            }
+            catch (S7CommPlusException ex)
+            {
+                RaiseCommunicationError(ex);
+                if (ex.IsTransient)
+                    SetState(S7CommPlusConnectionState.Faulted, ex);
+                subscription?.MarkFaulted(ex);
+                throw;
+            }
+            finally
+            {
+                _operationGate.Release();
+            }
+        }
+
+        /// <summary>Activates or re-arms an installed PLC trace.</summary>
+        public Task ActivateTraceAsync(S7CommPlusTraceReference trace, CancellationToken cancellationToken = default) =>
+            SetTraceEnabledAsync("ActivateTrace", trace, true, cancellationToken);
+
+        /// <summary>Stops recording without deleting the installed trace configuration.</summary>
+        public Task DeactivateTraceAsync(S7CommPlusTraceReference trace, CancellationToken cancellationToken = default) =>
+            SetTraceEnabledAsync("DeactivateTrace", trace, false, cancellationToken);
+
+        /// <summary>Explicitly deletes an installed PLC trace.</summary>
+        public async Task DeleteTraceAsync(S7CommPlusTraceReference trace, CancellationToken cancellationToken = default)
+        {
+            ValidateTraceReference(trace);
+            await ExecuteWriteOperationAsync("DeleteTrace", session =>
+            {
+                var currentTrace = ResolveCurrentTraceReference(session, trace, "DeleteTrace");
+                var error = session.DeleteTisTraceJob(currentTrace.ObjectId);
+                ThrowIfError("DeleteTrace", error);
+                return true;
+            }, cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task SetTraceEnabledAsync(string operation, S7CommPlusTraceReference trace, bool enabled, CancellationToken cancellationToken)
+        {
+            ValidateTraceReference(trace);
+            await ExecuteWriteOperationAsync(operation, session =>
+            {
+                var currentTrace = ResolveCurrentTraceReference(session, trace, operation);
+                var error = session.SetTisTraceJobEnabled(currentTrace.ObjectId, enabled);
+                ThrowIfError(operation, error);
+                return true;
+            }, cancellationToken).ConfigureAwait(false);
+        }
+
+        private S7CommPlusTraceReference ResolveCurrentTraceReference(
+            IS7CommPlusSession session,
+            S7CommPlusTraceReference trace,
+            string operation)
+        {
+            // Re-resolve even raw handles: completing or automatically re-arming a trace can replace the runtime object
+            // while the connection remains open, and PLC object ids can also change after a device restart.
+            var error = session.GetInstalledTraces(false, out var traces);
+            ThrowIfError(operation, error);
+            var installed = ResolveInstalledTrace(trace, traces);
+            if (installed == null)
+                throw new KeyNotFoundException($"Trace '{trace.Name}' is no longer installed on the PLC.");
+            return installed.Reference;
+        }
+
+        private static bool IsConnectionLocalTraceReference(S7CommPlusTraceReference trace) =>
+            String.Equals(trace.PersistentId, $"tis-object:{trace.ObjectId:X8}", StringComparison.Ordinal);
+
+        private static void ValidateTraceReference(S7CommPlusTraceReference trace)
+        {
+            if (trace == null)
+                throw new ArgumentNullException(nameof(trace));
+            if (trace.ObjectId == 0)
+                throw new ArgumentException("Trace reference does not contain a PLC object ID for the current connection.", nameof(trace));
         }
 
         /// <summary>
@@ -1654,38 +1863,52 @@ namespace S7CommPlusDriver
 
         private async Task RunTisTraceSubscriptionLoopAsync(S7CommPlusTisTraceSubscription subscription, S7CommPlusSubscriptionOptions subscriptionOptions, uint subscriptionObjectId, CancellationToken cancellationToken)
         {
+            var currentSubscriptionObjectId = subscriptionObjectId;
             try
             {
                 var consecutiveTimeouts = 0;
                 while (!subscription.IsStopRequested)
                 {
-                    var result = await RunWithTimeoutAsync(
-                        "WaitForTisTraceNotifications",
-                        () =>
-                        {
-                            var error = _session.WaitForTisTraceNotifications(
-                                subscriptionObjectId,
-                                subscriptionOptions.NotificationTimeoutMilliseconds,
-                                out var notifications);
-                            return (error, notifications);
-                        },
-                        subscriptionOptions.NotificationTimeout + TimeSpan.FromSeconds(1),
-                        CancellationToken.None).ConfigureAwait(false);
-
-                    if (result.error == S7Consts.errCliJobTimeout || result.error == S7Consts.errTCPReceiveTimeout)
+                    try
                     {
-                        consecutiveTimeouts++;
-                        if (subscriptionOptions.MaxConsecutiveTimeoutsBeforeFault > 0
-                            && consecutiveTimeouts >= subscriptionOptions.MaxConsecutiveTimeoutsBeforeFault)
-                            throw CreateException("WaitForTisTraceNotifications", result.error);
-                        continue;
-                    }
+                        var result = await RunWithTimeoutAsync(
+                            "WaitForTisTraceNotifications",
+                            () =>
+                            {
+                                var error = _session.WaitForTisTraceNotifications(
+                                    currentSubscriptionObjectId,
+                                    subscriptionOptions.NotificationTimeoutMilliseconds,
+                                    out var notifications);
+                                return (error, notifications);
+                            },
+                            subscriptionOptions.NotificationTimeout + TimeSpan.FromSeconds(1),
+                            CancellationToken.None).ConfigureAwait(false);
 
-                    ThrowIfError("WaitForTisTraceNotifications", result.error);
-                    consecutiveTimeouts = 0;
-                    foreach (var notification in result.notifications ?? Enumerable.Empty<S7CommPlusTisTraceNotification>())
-                        subscription.Publish(notification);
+                        if (result.error == S7Consts.errCliJobTimeout || result.error == S7Consts.errTCPReceiveTimeout)
+                        {
+                            consecutiveTimeouts++;
+                            if (subscriptionOptions.MaxConsecutiveTimeoutsBeforeFault > 0
+                                && consecutiveTimeouts >= subscriptionOptions.MaxConsecutiveTimeoutsBeforeFault)
+                                throw CreateException("WaitForTisTraceNotifications", result.error);
+                            continue;
+                        }
+
+                        ThrowIfError("WaitForTisTraceNotifications", result.error);
+                        consecutiveTimeouts = 0;
+                        foreach (var notification in result.notifications ?? Enumerable.Empty<S7CommPlusTisTraceNotification>())
+                            subscription.Publish(notification);
+                    }
+                    catch (S7CommPlusException ex) when (_options.AutoReconnect && ex.IsTransient && !subscription.IsStopRequested)
+                    {
+                        RaiseCommunicationError(ex);
+                        SetState(S7CommPlusConnectionState.Faulted, ex);
+                        currentSubscriptionObjectId = await ReattachTraceSubscriptionAsync(subscription, cancellationToken).ConfigureAwait(false);
+                        consecutiveTimeouts = 0;
+                    }
                 }
+            }
+            catch (OperationCanceledException) when (subscription.IsStopRequested)
+            {
             }
             catch (S7CommPlusException ex)
             {
@@ -1705,8 +1928,111 @@ namespace S7CommPlusDriver
             }
             finally
             {
-                await TryDeleteSubscriptionAsync("DeleteTisTraceSubscription", subscription, subscriptionOptions, () => _session.DeleteTisTraceSubscription(subscriptionObjectId)).ConfigureAwait(false);
+                await TryDeleteSubscriptionAsync("DeleteTisTraceSubscription", subscription, subscriptionOptions, () => _session.DeleteTisTraceSubscription(currentSubscriptionObjectId)).ConfigureAwait(false);
             }
+        }
+
+        private async Task<uint> ReattachTraceSubscriptionAsync(
+            S7CommPlusTisTraceSubscription subscription,
+            CancellationToken cancellationToken)
+        {
+            var reconnectDelay = TimeSpan.FromSeconds(1);
+            var forceReconnect = true;
+            while (!subscription.IsStopRequested)
+            {
+                try
+                {
+                    await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        ThrowIfDisposed();
+                        if (forceReconnect && _session?.IsConnected == true)
+                            await ReconnectCoreAsync(cancellationToken).ConfigureAwait(false);
+                        else
+                            await EnsureConnectedCoreAsync(cancellationToken).ConfigureAwait(false);
+                        forceReconnect = false;
+
+                        List<S7CommPlusInstalledTrace> traces = null;
+                        var listError = await RunOperationAttemptAsync(
+                            "GetInstalledTraces",
+                            session => session.GetInstalledTraces(false, out traces),
+                            _options.RequestTimeout,
+                            cancellationToken).ConfigureAwait(false);
+                        ThrowIfError("GetInstalledTraces", listError);
+
+                        var resolvedTrace = ResolveInstalledTrace(subscription.TraceReference, traces);
+                        if (resolvedTrace == null)
+                            throw CreateException("ReattachTisTraceSubscription", S7Consts.errCliItemNotAvailable);
+
+                        uint newSubscriptionObjectId = 0;
+                        var attachError = await RunOperationAttemptAsync(
+                            "AttachTisTraceSubscription",
+                            session => session.AttachTisTraceSubscription(
+                                resolvedTrace.Reference.ObjectId,
+                                resolvedTrace.Reference.Name,
+                                out newSubscriptionObjectId),
+                            _options.RequestTimeout,
+                            cancellationToken).ConfigureAwait(false);
+                        ThrowIfError("AttachTisTraceSubscription", attachError);
+                        subscription.UpdateTraceReference(resolvedTrace.Reference);
+                        return newSubscriptionObjectId;
+                    }
+                    finally
+                    {
+                        _operationGate.Release();
+                    }
+                }
+                catch (OperationCanceledException) when (subscription.IsStopRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _options.Logger.LogWarning(
+                        ex,
+                        "Unable to reattach trace {TraceId} on {Endpoint}; retrying.",
+                        subscription.TraceReference.PersistentId,
+                        Endpoint);
+                }
+
+                await Task.Delay(reconnectDelay, cancellationToken).ConfigureAwait(false);
+                if (reconnectDelay < TimeSpan.FromSeconds(30))
+                    reconnectDelay = TimeSpan.FromSeconds(Math.Min(30, reconnectDelay.TotalSeconds * 2));
+            }
+
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        private static S7CommPlusInstalledTrace ResolveInstalledTrace(
+            S7CommPlusTraceReference reference,
+            IEnumerable<S7CommPlusInstalledTrace> traces)
+        {
+            if (reference == null || traces == null)
+                return null;
+
+            var byIdentity = traces.FirstOrDefault(trace =>
+                trace != null
+                && String.Equals(trace.Reference.PersistentId, reference.PersistentId, StringComparison.Ordinal));
+            if (byIdentity != null)
+                return byIdentity;
+
+            if (reference.CreationTimestamp.HasValue)
+            {
+                return traces.FirstOrDefault(trace =>
+                    trace != null
+                    && String.Equals(trace.Reference.Name, reference.Name, StringComparison.Ordinal)
+                    && trace.Reference.CreationTimestamp == reference.CreationTimestamp);
+            }
+
+            // A persistent reference must never select a replacement trace merely because its display name was reused.
+            // Low-level connection-local references have no durable identity, so they can only be matched to their exact
+            // runtime object while that object is still present on the current connection.
+            if (!IsConnectionLocalTraceReference(reference))
+                return null;
+            return traces.FirstOrDefault(trace =>
+                trace != null
+                && trace.Reference.ObjectId == reference.ObjectId
+                && String.Equals(trace.Reference.Name, reference.Name, StringComparison.Ordinal));
         }
 
         private async Task RunSubscriptionLoopAsync(

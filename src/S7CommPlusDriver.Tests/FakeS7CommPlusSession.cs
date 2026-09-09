@@ -35,6 +35,9 @@ namespace S7CommPlusDriver.Tests
         public int TisTraceSubscriptionCreateCount { get; private set; }
         public int TisTraceSubscriptionWaitCount { get; private set; }
         public int TisTraceSubscriptionDeleteCount { get; private set; }
+        public int TisTraceJobDeleteCount { get; private set; }
+        public int TisTraceJobEnabledWriteCount { get; private set; }
+        public bool? LastTraceQueryIncludedResultData { get; private set; }
         public int LastActiveAlarmsLanguageId { get; private set; }
         public int RequestTimeoutMilliseconds { get; private set; }
         public List<int> RequestTimeoutHistory { get; } = new List<int>();
@@ -51,6 +54,7 @@ namespace S7CommPlusDriver.Tests
         public List<uint> DeletedAlarmSubscriptionIds { get; } = new List<uint>();
         public List<uint> DeletedTisWatchSubscriptionIds { get; } = new List<uint>();
         public List<uint> DeletedTisTraceSubscriptionIds { get; } = new List<uint>();
+        public List<uint> DeletedTisTraceJobIds { get; } = new List<uint>();
         private uint _nextSubscriptionObjectId = 1;
 
         public Func<S7CommPlusClientOptions, int>? ConnectHandler { get; set; }
@@ -87,9 +91,15 @@ namespace S7CommPlusDriver.Tests
         public Func<uint, int, (int Error, List<S7CommPlusTisWatchNotification> Notifications)>? WaitForTisWatchSubscriptionByIdHandler { get; set; }
         public Func<int>? DeleteTisWatchSubscriptionHandler { get; set; }
         public Func<S7CommPlusTisTraceRequest, int>? CreateTisTraceSubscriptionHandler { get; set; }
+        public Func<uint, string, int>? AttachTisTraceSubscriptionHandler { get; set; }
+        public Func<(int Error, List<S7CommPlusInstalledTrace> Traces)>? InstalledTracesHandler { get; set; }
+        public Func<(int Error, List<S7CommPlusStoredTraceMeasurement> Measurements)>? StoredTraceMeasurementsHandler { get; set; }
         public Func<int, (int Error, List<S7CommPlusTisTraceNotification> Notifications)>? WaitForTisTraceSubscriptionHandler { get; set; }
         public Func<uint, int, (int Error, List<S7CommPlusTisTraceNotification> Notifications)>? WaitForTisTraceSubscriptionByIdHandler { get; set; }
         public Func<int>? DeleteTisTraceSubscriptionHandler { get; set; }
+        public Func<uint, int>? DeleteTisTraceJobHandler { get; set; }
+        public Func<uint, int>? DeleteStoredTraceMeasurementHandler { get; set; }
+        public Func<uint, bool, int>? SetTisTraceJobEnabledHandler { get; set; }
         public string LastTisWatchDiagnostic { get; set; } = "";
         public string LastTisTraceDiagnostic { get; set; } = "";
         public string LastAlarmSubscriptionDiagnostic { get; set; } = "";
@@ -373,16 +383,28 @@ namespace S7CommPlusDriver.Tests
             return DeleteTisWatchSubscriptionHandler?.Invoke() ?? 0;
         }
 
-        public int CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint subscriptionObjectId)
+        public int CreateTisTraceSubscription(S7CommPlusTisTraceRequest request, out uint jobObjectId, out uint subscriptionObjectId)
         {
+            jobObjectId = 0;
             subscriptionObjectId = 0;
             TisTraceSubscriptionCreateCount++;
             var result = CreateTisTraceSubscriptionHandler?.Invoke(request) ?? 0;
             if (result == 0)
             {
+                jobObjectId = _nextSubscriptionObjectId++;
                 subscriptionObjectId = _nextSubscriptionObjectId++;
                 CreatedTisTraceSubscriptionIds.Add(subscriptionObjectId);
             }
+            return result;
+        }
+
+        public int AttachTisTraceSubscription(uint jobObjectId, string jobName, out uint subscriptionObjectId)
+        {
+            TisTraceSubscriptionCreateCount++;
+            var result = AttachTisTraceSubscriptionHandler?.Invoke(jobObjectId, jobName) ?? 0;
+            subscriptionObjectId = result == 0 ? _nextSubscriptionObjectId++ : 0;
+            if (subscriptionObjectId != 0)
+                CreatedTisTraceSubscriptionIds.Add(subscriptionObjectId);
             return result;
         }
 
@@ -397,11 +419,47 @@ namespace S7CommPlusDriver.Tests
             return result.Error;
         }
 
+        public int GetInstalledTraces(bool includeResultData, out List<S7CommPlusInstalledTrace> traces)
+        {
+            LastTraceQueryIncludedResultData = includeResultData;
+            var result = InstalledTracesHandler?.Invoke() ?? (0, new List<S7CommPlusInstalledTrace>());
+            traces = result.Traces;
+            return result.Error;
+        }
+
+        public int GetStoredTraceMeasurements(
+            bool includeResultData,
+            out List<S7CommPlusStoredTraceMeasurement> measurements)
+        {
+            var result = StoredTraceMeasurementsHandler?.Invoke()
+                ?? (0, new List<S7CommPlusStoredTraceMeasurement>());
+            measurements = result.Measurements;
+            return result.Error;
+        }
+
         public int DeleteTisTraceSubscription(uint subscriptionObjectId)
         {
             TisTraceSubscriptionDeleteCount++;
             DeletedTisTraceSubscriptionIds.Add(subscriptionObjectId);
             return DeleteTisTraceSubscriptionHandler?.Invoke() ?? 0;
+        }
+
+        public int DeleteTisTraceJob(uint jobObjectId)
+        {
+            TisTraceJobDeleteCount++;
+            DeletedTisTraceJobIds.Add(jobObjectId);
+            return DeleteTisTraceJobHandler?.Invoke(jobObjectId) ?? 0;
+        }
+
+        public int SetTisTraceJobEnabled(uint jobObjectId, bool enabled)
+        {
+            TisTraceJobEnabledWriteCount++;
+            return SetTisTraceJobEnabledHandler?.Invoke(jobObjectId, enabled) ?? 0;
+        }
+
+        public int DeleteStoredTraceMeasurement(uint measurementObjectId)
+        {
+            return DeleteStoredTraceMeasurementHandler?.Invoke(measurementObjectId) ?? 0;
         }
     }
 }

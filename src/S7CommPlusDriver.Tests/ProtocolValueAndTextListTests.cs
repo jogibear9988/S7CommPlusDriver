@@ -10,6 +10,27 @@ namespace S7CommPlusDriver.Tests
     public sealed class ProtocolValueAndTextListTests
     {
         [Fact]
+        public void ObjectDecoderAcceptsRepeatedInheritedAttributeAndKeepsLastValue()
+        {
+            using var stream = new MemoryStream();
+            S7p.EncodeByte(stream, ElementID.Attribute);
+            S7p.EncodeUInt32Vlq(stream, Ids.ObjectVariableTypeName);
+            new ValueWString("Base name").Serialize(stream);
+            S7p.EncodeByte(stream, ElementID.Attribute);
+            S7p.EncodeUInt32Vlq(stream, Ids.ObjectVariableTypeName);
+            new ValueWString("Effective name").Serialize(stream);
+            S7p.EncodeByte(stream, ElementID.TerminatingObject);
+            stream.Position = 0;
+            var obj = new PObject();
+
+            S7p.DecodeObject(stream, ref obj);
+
+            var name = Assert.IsType<ValueWString>(obj.GetAttribute(Ids.ObjectVariableTypeName));
+            Assert.Equal("Effective name", name.GetValue());
+            Assert.Equal(stream.Length, stream.Position);
+        }
+
+        [Fact]
         public void AddressArrayOfVariantsRoundTripsCapturedWireShape()
         {
             var bytes = new byte[]

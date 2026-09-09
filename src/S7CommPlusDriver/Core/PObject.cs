@@ -48,6 +48,13 @@ namespace S7CommPlusDriver
             Attributes.Add(attributeid, value);
         }
 
+        internal void SetDecodedAttribute(UInt32 attributeid, PValue value)
+        {
+            // Explore responses can contain the same inherited attribute more than once for one object.
+            // The last wire value is the effective value. Keep AddAttribute strict for request construction.
+            Attributes[attributeid] = value;
+        }
+
         public PValue GetAttribute(UInt32 attributeid)
         {
             return Attributes[attributeid];

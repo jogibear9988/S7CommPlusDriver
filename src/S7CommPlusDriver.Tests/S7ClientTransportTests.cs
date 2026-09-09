@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using S7CommPlusDriver.Internal;
 using Xunit;
 
@@ -100,6 +102,33 @@ namespace S7CommPlusDriver.Tests
             Assert.Equal(0, repeatedError);
             Assert.Equal(1, transport.CloseCount);
             Assert.False(transport.Connected);
+        }
+
+        [Fact]
+        public void SendFragmentsPayloadAtNegotiatedCotpBoundary()
+        {
+            var transport = new FakeS7Transport { EmptyReceiveDelayMilliseconds = 500 };
+            transport.EnqueueReceive(new byte[] { 0x03, 0x00, 0x00, 0x23 });
+            transport.EnqueueReceive(new byte[] { 0x1E, 0xD0, 0x00 });
+            transport.EnqueueReceive(new byte[28]);
+            var client = new S7Client(() => transport);
+            client.SetConnectionParams(
+                "1.2.3.4",
+                0x0600,
+                System.Text.Encoding.ASCII.GetBytes(S7CommPlusDefaults.RemoteTsapEs));
+            Assert.Equal(0, client.Connect());
+            transport.Sent.Clear();
+            var payload = Enumerable.Range(0, 2000).Select(value => (byte)value).ToArray();
+
+            client.Send(payload);
+            client.Disconnect(50);
+
+            Assert.Equal(2, transport.Sent.Count);
+            Assert.Equal(1024, transport.Sent[0].Length);
+            Assert.Equal(990, transport.Sent[1].Length);
+            Assert.Equal(0x00, transport.Sent[0][6]);
+            Assert.Equal(0x80, transport.Sent[1][6]);
+            Assert.Equal(payload, transport.Sent.SelectMany(packet => packet.Skip(7)).ToArray());
         }
     }
 }

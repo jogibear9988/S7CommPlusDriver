@@ -30,6 +30,17 @@ namespace S7CommPlusDriver
         /// <returns>The decompressed blob as string. If decompression failed, the string is empty</returns>
         public string decompress(byte[] compressed_blob, int startoffset)
         {
+            return decompress(compressed_blob, startoffset, Int32.MaxValue);
+        }
+
+        /// <summary>
+        /// Decompresses a zlib blob while enforcing an upper bound on the expanded payload.
+        /// </summary>
+        /// <param name="compressed_blob">The zlib-compressed byte array.</param>
+        /// <param name="startoffset">The offset at which the zlib stream starts.</param>
+        /// <param name="maximumOutputLength">The largest expanded payload accepted, in bytes.</param>
+        public string decompress(byte[] compressed_blob, int startoffset, int maximumOutputLength)
+        {
             if (compressed_blob == null)
             {
                 throw new ArgumentNullException(nameof(compressed_blob));
@@ -38,12 +49,16 @@ namespace S7CommPlusDriver
             {
                 throw new ArgumentOutOfRangeException(nameof(startoffset));
             }
+            if (maximumOutputLength <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumOutputLength));
+            }
 
             int retcode;
             string retstring = String.Empty;
             byte[] dict = null;
             const int BLOB_DECOMPRESS_BUFSIZE = 16384;
-            byte[] uncompressed_blob = new byte[BLOB_DECOMPRESS_BUFSIZE];
+            byte[] uncompressed_blob = new byte[Math.Min(BLOB_DECOMPRESS_BUFSIZE, maximumOutputLength)];
             int uncomp_length = uncompressed_blob.Length;
 
             ZStream z = new ZStream();
@@ -139,12 +154,20 @@ namespace S7CommPlusDriver
                 // Z_BUF_ERROR -> output buffer full
                 if (z.avail_out == 0)
                 {
+                    if (uncomp_length >= maximumOutputLength)
+                    {
+                        z.inflateEnd();
+                        throw new InvalidDataException(String.Format(
+                            "Blob decompression exceeded the configured {0}-byte output limit.",
+                            maximumOutputLength));
+                    }
                     // need more memory
-                    Array.Resize(ref uncompressed_blob, uncomp_length + BLOB_DECOMPRESS_BUFSIZE);
+                    int newLength = Math.Min(maximumOutputLength, checked(uncomp_length + BLOB_DECOMPRESS_BUFSIZE));
+                    Array.Resize(ref uncompressed_blob, newLength);
                     z.next_out = uncompressed_blob;
                     z.next_out_index = uncomp_length;
-                    z.avail_out = BLOB_DECOMPRESS_BUFSIZE;
-                    uncomp_length += BLOB_DECOMPRESS_BUFSIZE;
+                    z.avail_out = newLength - uncomp_length;
+                    uncomp_length = newLength;
                 }
                 else
                 {
