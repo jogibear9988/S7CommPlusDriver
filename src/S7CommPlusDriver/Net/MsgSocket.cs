@@ -25,10 +25,8 @@ namespace S7CommPlusDriver
 		{
 		}
 
-		~MsgSocket()
-		{
-			Close();
-		}
+		// Socket owns a safe handle and performs its own finalization. This wrapper
+		// must not dispose managed objects from the GC finalizer thread.
 
 		public void Close()
 		{

@@ -299,6 +299,25 @@ namespace S7CommPlusDriver
 
         private void RefreshLegacySessionKey(object state)
         {
+            try
+            {
+                RefreshLegacySessionKeyCore(state);
+            }
+            catch (Exception ex)
+            {
+                // This is a ThreadPool entry point. Logging, cleanup, and timer
+                // rescheduling can also throw (e.g. Change racing with Dispose).
+                if (state is not int generation
+                    || generation != Volatile.Read(ref m_LegacySessionKeyRefreshGeneration))
+                    return;
+                m_LastErrorDetail = $"Legacy session-key refresh failed: {ex.GetType().Name}: {ex.Message}";
+                PublishReceiveError(S7Consts.errS7CommPlusLegacyAuthentication);
+                CloseTransport();
+            }
+        }
+
+        private void RefreshLegacySessionKeyCore(object state)
+        {
             if (state is not int generation
                 || generation != Volatile.Read(ref m_LegacySessionKeyRefreshGeneration))
             {

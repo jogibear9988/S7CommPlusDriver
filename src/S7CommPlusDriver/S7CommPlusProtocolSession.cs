@@ -1058,6 +1058,7 @@ namespace S7CommPlusDriver
         private void PrepareClient(string address, int timeoutMs, int port, ushort localTsap, byte[] remoteTsap)
         {
             StopLegacySessionKeyRefresh();
+            DisposeClient(timeoutMs);
             m_LastError = 0;
             m_LastErrorDetail = string.Empty;
             m_LegacyDigestActive = false;
@@ -1244,6 +1245,18 @@ namespace S7CommPlusDriver
             TryDisconnect(m_ReadTimeout);
         }
 
+        private int DisposeClient(int timeoutMs)
+        {
+            var client = Interlocked.Exchange(ref m_client, null);
+            if (client == null)
+                return 0;
+
+            // A receive that is still unwinding must not publish into a new session.
+            client.OnDataReceived = null;
+            client.OnReceiveError = null;
+            return client.Dispose(timeoutMs);
+        }
+
         public int TryDisconnect(int timeoutMs = 2000)
         {
             StopLegacySessionKeyRefresh();
@@ -1269,7 +1282,7 @@ namespace S7CommPlusDriver
             {
                 try
                 {
-                    var disconnectResult = m_client?.Disconnect(timeoutMs) ?? 0;
+                    var disconnectResult = DisposeClient(timeoutMs);
                     if (res == 0)
                     {
                         res = disconnectResult;
@@ -1317,7 +1330,7 @@ namespace S7CommPlusDriver
 
             try
             {
-                return m_client?.Disconnect(timeoutMs) ?? 0;
+                return DisposeClient(timeoutMs);
             }
             catch
             {

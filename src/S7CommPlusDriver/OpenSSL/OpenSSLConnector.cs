@@ -78,7 +78,14 @@ namespace OpenSsl
 
         ~OpenSSLConnector()
         {
-            Dispose(false);
+            try
+            {
+                Dispose(false);
+            }
+            catch (Exception)
+            {
+                // Native loading/release errors must not escape the finalizer thread.
+            }
         }
 
         public void Dispose()
@@ -94,7 +101,9 @@ namespace OpenSsl
                 return;
             }
 
-            Native.SSL_free(m_pSslConnection);
+            // A constructor that fails to load OpenSSL also schedules finalization.
+            if (m_pSslConnection != IntPtr.Zero)
+                Native.SSL_free(m_pSslConnection);
             m_disposed = true;
         }
 

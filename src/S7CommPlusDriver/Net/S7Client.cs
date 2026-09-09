@@ -75,7 +75,8 @@ namespace S7CommPlusDriver
 
 		bool m_SslActive = false;
 		Thread m_runThread;
-		bool m_runThread_DoStop;
+		volatile bool m_runThread_DoStop;
+		readonly object m_cleanupLock = new object();
 		IntPtr m_ptr_ssl_method;
 		IntPtr m_ptr_ctx;
 		IS7TlsConnector m_sslconn;
@@ -125,19 +126,26 @@ namespace S7CommPlusDriver
 			LastErrorDetail = string.IsNullOrWhiteSpace(sslState)
 				? $"OpenSSL reported SSL error {sslError}."
 				: $"OpenSSL reported SSL error {sslError}: {sslState}";
-			OnReceiveError?.Invoke(_LastError);
+			NotifyReceiveError(_LastError);
 		}
 
 		// OpenSSL Key Callback Funktion. Gibt die ausgehandelden privaten Schl�ssel aus. Kann beispielsweise
 		// in eine Wireshark Aufzeichnung eingef�gt werden um dort die TLS Kommunikation zu entschl�sseln.
 		public void SSL_CTX_keylog_cb(IntPtr ssl, string line)
 		{
-			string filename = "key_" + m_DateTimeStarted.ToString("yyyyMMdd_HHmmss") + ".log";
-			if (WriteSslKeyPath != null)
-				filename = Path.Combine(WriteSslKeyPath, filename);
-			StreamWriter file = new StreamWriter(filename, append: true);
-			file.WriteLine(line);
-			file.Close();
+			// Never unwind a managed exception through an OpenSSL callback.
+			try
+			{
+				string filename = "key_" + m_DateTimeStarted.ToString("yyyyMMdd_HHmmss") + ".log";
+				if (WriteSslKeyPath != null)
+					filename = Path.Combine(WriteSslKeyPath, filename);
+				using StreamWriter file = new StreamWriter(filename, append: true);
+				file.WriteLine(line);
+			}
+			catch (Exception ex)
+			{
+				LastErrorDetail = $"TLS key logging failed: {ex.GetType().Name}: {ex.Message}";
+			}
 		}
 
 		// Startet OpenSSL und aktiviert ab jetzt TLS
@@ -209,13 +217,21 @@ namespace S7CommPlusDriver
 		public void SslDeactivate()
 		{
 			m_SslActive = false;
-			m_sslconn?.Dispose();
-			m_sslconn = null;
-			if (m_ptr_ctx != IntPtr.Zero)
+			try
 			{
-				Native.SSL_CTX_free(m_ptr_ctx);
-				m_ptr_ctx = IntPtr.Zero;
+				Interlocked.Exchange(ref m_sslconn, null)?.Dispose();
 			}
+			finally
+			{
+				ReleaseSslContext();
+			}
+		}
+
+		private void ReleaseSslContext()
+		{
+			var context = Interlocked.Exchange(ref m_ptr_ctx, IntPtr.Zero);
+			if (context != IntPtr.Zero)
+				Native.SSL_CTX_free(context);
 		}
 
 		/// <summary>
@@ -223,20 +239,93 @@ namespace S7CommPlusDriver
 		/// </summary>
 		public void Dispose()
 		{
-			Disconnect();
-			GC.SuppressFinalize(this);
+			Dispose(DefaultTimeout);
+		}
+
+		internal int Dispose(int timeoutMilliseconds)
+		{
+			try
+			{
+				return Disconnect(timeoutMilliseconds);
+			}
+			finally
+			{
+				GC.SuppressFinalize(this);
+			}
 		}
 		#endregion
 
 		private void StartThread()
 		{
 			m_runThread_DoStop = false;
-			m_runThread = new Thread(RunThread);
+			m_runThread = new Thread(RunThread) { IsBackground = true, Name = "S7CommPlus receive" };
 			m_runThread.Start();
 		}
 
 		// Der Task der kontinuierlich ausgef�hrt wird
 		private void RunThread()
+		{
+			try
+			{
+				ReceiveLoop();
+			}
+			catch (Exception ex)
+			{
+				if (!m_runThread_DoStop)
+				{
+					LastErrorDetail = $"Receive failed: {ex.GetType().Name}: {ex.Message}";
+					_LastError = S7Consts.errTCPDataReceive;
+					NotifyReceiveError(_LastError);
+				}
+			}
+			finally
+			{
+				m_runThread_DoStop = true;
+				try
+				{
+					Interlocked.Exchange(ref Socket, null)?.Close();
+				}
+				catch (Exception ex)
+				{
+					LastErrorDetail += $" Transport cleanup failed: {ex.GetType().Name}: {ex.Message}";
+				}
+				// This also handles disconnect from a callback or a timed-out join:
+				// TLS must remain alive until the receive callback has returned.
+				lock (m_cleanupLock)
+				{
+					TryDeactivateSsl();
+				}
+			}
+		}
+
+		private void NotifyReceiveError(int error)
+		{
+			try
+			{
+				OnReceiveError?.Invoke(error);
+			}
+			catch (Exception ex)
+			{
+				LastErrorDetail += $" Receive error callback failed: {ex.GetType().Name}: {ex.Message}";
+			}
+		}
+
+		private int TryDeactivateSsl()
+		{
+			try
+			{
+				SslDeactivate();
+				return 0;
+			}
+			catch (Exception ex)
+			{
+				_LastError = S7Consts.errOpenSSL;
+				LastErrorDetail = $"TLS cleanup failed: {ex.GetType().Name}: {ex.Message}";
+				return _LastError;
+			}
+		}
+
+		private void ReceiveLoop()
 		{
 			int Length;
 			while (!m_runThread_DoStop)
@@ -244,6 +333,8 @@ namespace S7CommPlusDriver
 				// Versuchen zu lesen
 				_LastError = 0;
 				Length = RecvIsoPacket();
+				if (m_runThread_DoStop)
+					break;
 				if (Length > 0) {
 					byte[] Buffer = new byte[Length - TPKT_ISO.Length];
 					Array.Copy(PDU, TPKT_ISO.Length, Buffer, 0, Length - TPKT_ISO.Length);
@@ -259,7 +350,7 @@ namespace S7CommPlusDriver
 				}
 				else if (_LastError != 0 && _LastError != S7Consts.errTCPReceiveTimeout)
 				{
-					OnReceiveError?.Invoke(_LastError);
+					NotifyReceiveError(_LastError);
 					break;
 				}
 			}
@@ -549,11 +640,23 @@ namespace S7CommPlusDriver
 
 		~S7Client()
 		{
-			Disconnect();
+			// Managed objects (especially Thread) may already have been finalized.
+			// Do not join threads, dispose transports/TLS connectors, or invoke callbacks here.
+			try
+			{
+				ReleaseSslContext();
+			}
+			catch (Exception)
+			{
+				// A finalizer must never terminate the host process.
+			}
 		}
 
 		public int Connect()
 		{
+			// A timed-out disconnect must finish before this instance can be reused.
+			if (m_runThread != null && m_runThread.IsAlive)
+				return Connected && !m_runThread_DoStop ? 0 : S7Consts.errCliDestroying;
 			_LastError = 0;
 			_PDULength = 0;
 			Time_ms = 0;
@@ -616,23 +719,36 @@ namespace S7CommPlusDriver
 		public int Disconnect(int timeoutMilliseconds)
 		{
 			m_runThread_DoStop = true;
-			_LastError = 0;
+			int result = 0;
 			var socket = Interlocked.Exchange(ref Socket, null);
-			socket?.Close();
-			if (m_runThread != null && m_runThread.IsAlive)
+			try
 			{
-				if (!m_runThread.Join(Math.Max(1, timeoutMilliseconds)))
+				result = socket?.Close() ?? 0;
+			}
+			catch (Exception ex)
+			{
+				result = S7Consts.errTCPDataReceive;
+				LastErrorDetail = $"Transport cleanup failed: {ex.GetType().Name}: {ex.Message}";
+			}
+			var receiveThread = m_runThread;
+			if (receiveThread == Thread.CurrentThread)
+				return _LastError = result;
+			if (receiveThread != null && receiveThread.IsAlive)
+			{
+				if (!receiveThread.Join(Math.Max(1, timeoutMilliseconds)))
 				{
 					_LastError = S7Consts.errCliDestroying;
-				}
-				else
-				{
-					_LastError = 0;
+					return _LastError;
 				}
 			}
-			SslDeactivate();
+			lock (m_cleanupLock)
+			{
+				var tlsResult = TryDeactivateSsl();
+				if (result == 0)
+					result = tlsResult;
+			}
 
-			return _LastError;
+			return _LastError = result;
 		}
 
 		public int GetParam(Int32 ParamNumber, ref int Value)

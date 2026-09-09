@@ -20,7 +20,8 @@ namespace S7CommPlusDriver.Tls
         private readonly PlcTlsClient _tlsClient;
         private readonly BlockingCollection<byte[]> _decryptedData = new BlockingCollection<byte[]>();
         private readonly Thread _readerThread;
-        private bool _disposed;
+        private volatile bool _disposed;
+        private bool _handshakeStarted;
 
         public BouncyCastleTlsConnector(IS7TlsConnectorCallback dataSink)
         {
@@ -39,6 +40,7 @@ namespace S7CommPlusDriver.Tls
         public void StartHandshake()
         {
             ThrowIfDisposed();
+            _handshakeStarted = true;
             _protocol.Connect(_tlsClient);
             _readerThread.Start();
         }
@@ -91,7 +93,9 @@ namespace S7CommPlusDriver.Tls
             _recordStream.Complete();
             _decryptedData.CompleteAdding();
             _tlsClient.ClearOmsExporterSecret();
-            _protocol.Close();
+            // Bouncy Castle cannot send a close alert before Connect initialized its peer.
+            if (_handshakeStarted)
+                _protocol.Close();
         }
 
         private void ReadDecryptedData()
@@ -117,7 +121,14 @@ namespace S7CommPlusDriver.Tls
             {
                 if (!_disposed)
                 {
-                    _dataSink.OnSslError(-1, ex.Message);
+                    try
+                    {
+                        _dataSink.OnSslError(-1, ex.Message);
+                    }
+                    catch (Exception)
+                    {
+                        // An error callback must not escape this background thread.
+                    }
                 }
             }
         }

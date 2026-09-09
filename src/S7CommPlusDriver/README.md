@@ -152,3 +152,11 @@ Communication limits are exposed through `GetCommunicationResourcesAsync()`, inc
 Block metadata is available through `BrowseBlocksAsync()`, `GetPlcStructureXmlAsync()`, `BrowseBlockStructureAsync()`, and `GetBlockContentAsync(relid)`.
 
 Advanced block-watch scenarios can use `OpenBlockOnlineViewAsync()` with a caller-provided `S7CommPlusTisWatchRequest`; the returned `S7CommPlusTisWatchSubscription` exposes parsed watch notifications and follows the same disposable subscription lifecycle.
+
+## Driver failures and process isolation
+
+Dispose clients and subscriptions when shutting down or replacing them. Protocol sessions dispose their internal transport clients on disconnect and before replacement. Finalizers release only native resources; they never inspect or join threads or dispose managed transports. This addresses KCC-2134, where repeated reconnects left internal clients for finalization and `Thread.IsAlive` threw on the GC finalizer thread, terminating the host process.
+
+Managed exceptions from the receive loop, TLS reader error callbacks, and legacy session-key refresh timer are contained at their background entry points. Receive failures use the existing receive-error path; the low-level `S7Client.LastErrorDetail` retains diagnostic context. TLS key-log file errors also remain inside the native callback. Normal shutdown stops the receive thread before releasing its TLS resources; a timed-out shutdown defers that release until the thread exits.
+
+Callers must still handle failed or cancelled API tasks. In-process exception handling cannot guarantee survival of native memory corruption, stack overflow, or other fatal runtime failures. Applications requiring isolation from such driver failures should run PLC communication in a separate worker process, exchange requests and results over IPC, and supervise/restart that worker. This library does not introduce a worker process automatically.
